@@ -205,16 +205,19 @@ function parseClientLine(line: string): TmuxClient | null {
 }
 
 function parseWindowLine(line: string): TmuxWindow | null {
-  const parts = line.split(TMUX_FIELD_SEPARATOR);
-  if (parts.length < 4) return null;
-  const index = parseInt(parts[0]!, 10);
-  const panes = parseInt(parts[2]!, 10);
+  const firstSeparator = line.indexOf(TMUX_FIELD_SEPARATOR);
+  const lastSeparator = line.lastIndexOf(TMUX_FIELD_SEPARATOR);
+  const panesSeparator = line.lastIndexOf(TMUX_FIELD_SEPARATOR, lastSeparator - 1);
+  if (firstSeparator < 0 || panesSeparator <= firstSeparator || lastSeparator <= panesSeparator) return null;
+
+  const index = parseInt(line.slice(0, firstSeparator), 10);
+  const panes = parseInt(line.slice(panesSeparator + 1, lastSeparator), 10);
   if (isNaN(index) || isNaN(panes)) return null;
   return {
     index,
-    name: parts[1]!,
+    name: line.slice(firstSeparator + 1, panesSeparator),
     panes,
-    active: parts[3] === "1",
+    active: line.slice(lastSeparator + 1) === "1",
   };
 }
 

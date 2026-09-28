@@ -117,6 +117,16 @@ describe("TmuxAdapter", () => {
       expect(windows[1]!.active).toBe(false);
     });
 
+    it("preserves separators inside window names", async () => {
+      const adapter = new TmuxAdapter(
+        mockExec({ "list-windows": { stdout: "0|foo|bar|3|1" } })
+      );
+
+      const windows = await adapter.listWindows("my-session");
+
+      expect(windows).toEqual([{ index: 0, name: "foo|bar", panes: 3, active: true }]);
+    });
+
     it("returns empty array on 'no server running' error", async () => {
       const adapter = new TmuxAdapter(mockExec({ "list-windows": { error: NO_SERVER_ERROR } }));
       const windows = await adapter.listWindows("my-session");
