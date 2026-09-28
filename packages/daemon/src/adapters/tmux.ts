@@ -97,7 +97,12 @@ const SESSION_FORMAT = [
   "#{session_created}",
   "#{session_attached}",
 ].join(TMUX_FIELD_SEPARATOR);
-const WINDOW_FORMAT = "#{window_index}\t#{window_name}\t#{window_panes}\t#{window_active}";
+const WINDOW_FORMAT = [
+  "#{window_index}",
+  "#{window_name}",
+  "#{window_panes}",
+  "#{window_active}",
+].join(TMUX_FIELD_SEPARATOR);
 // tmux 3.6 sanitizes literal control characters in -F output to underscores,
 // so tab-delimited session and pane rows become unparseable. Use a printable
 // delimiter for these adapter-owned formats instead.
@@ -200,7 +205,7 @@ function parseClientLine(line: string): TmuxClient | null {
 }
 
 function parseWindowLine(line: string): TmuxWindow | null {
-  const parts = line.split("\t");
+  const parts = line.split(TMUX_FIELD_SEPARATOR);
   if (parts.length < 4) return null;
   const index = parseInt(parts[0]!, 10);
   const panes = parseInt(parts[2]!, 10);

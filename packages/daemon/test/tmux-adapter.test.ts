@@ -83,7 +83,7 @@ describe("TmuxAdapter", () => {
 
       expect(exec).toHaveBeenCalledOnce();
       expect(exec.mock.calls[0]![0]).toBe(
-        'tmux list-windows -t \'my-session\' -F "#{window_index}\t#{window_name}\t#{window_panes}\t#{window_active}"'
+        'tmux list-windows -t \'my-session\' -F "#{window_index}|#{window_name}|#{window_panes}|#{window_active}"'
       );
     });
 
@@ -95,14 +95,14 @@ describe("TmuxAdapter", () => {
 
       expect(exec).toHaveBeenCalledOnce();
       expect(exec.mock.calls[0]![0]).toBe(
-        'tmux list-windows -t \'my session\'\"\'\"\'s name\' -F "#{window_index}\t#{window_name}\t#{window_panes}\t#{window_active}"'
+        'tmux list-windows -t \'my session\'\"\'\"\'s name\' -F "#{window_index}|#{window_name}|#{window_panes}|#{window_active}"'
       );
     });
 
     it("parses output into typed TmuxWindow objects", async () => {
       const output = [
-        "0\tmain\t1\t1",
-        "1\twork\t2\t0",
+        "0|main|1|1",
+        "1|work|2|0",
       ].join("\n");
 
       const adapter = new TmuxAdapter(mockExec({ "list-windows": { stdout: output } }));
