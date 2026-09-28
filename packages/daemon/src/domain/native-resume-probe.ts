@@ -279,7 +279,7 @@ function looksLikeClaudeResumeSelectionPrompt(paneContent: string): boolean {
   if (!hasChooseVerb) return false;
 
   // Look for the numbered/arrow option marker in recent lines.
-  const numberedOption = recentLines.some((line) => /^\s*(?:›\s*)?\d+\.\s+\S/.test(line));
+  const numberedOption = recentLines.some((line) => /^\s*(?:[›»]\s*)?\d+\.\s+\S/.test(line));
   return numberedOption;
 }
 
@@ -300,7 +300,8 @@ function looksLikeCodexTui(paneContent: string): boolean {
   const recentLines = current.trimEnd().split("\n").slice(-20).join("\n");
   const hasPromptLine = recentLines.split("\n").some((line) => {
     const text = line.trimStart();
-    return text.startsWith("›") && !/^\d+\.\s/.test(text.slice(1).trimStart());
+    const hasPrompt = text.startsWith("›") || text.startsWith("»");
+    return hasPrompt && !/^\d+\.\s/.test(text.slice(1).trimStart());
   });
   const hasModelFooter = /(^|\n)\s{2,}gpt-[^\n]+ · [^\n]+(?:\n|$)/.test(recentLines);
   return hasPromptLine && (current.includes("OpenAI Codex (v") || hasModelFooter);
@@ -338,7 +339,7 @@ function looksLikeCodexHookReviewPrompt(paneContent: string): boolean {
   // Closing a review panel may redraw only the input prompt, without a new
   // header. A later non-menu conversation prompt supersedes that old panel.
   const gateEnd = Math.max(current.lastIndexOf("Press t to trust"), current.lastIndexOf("Trust all and continue"));
-  if (gateEnd >= 0 && current.slice(gateEnd).split("\n").some((line) => /^\s*›(?:\s|$)/.test(line) && !/^\s*›\s*\d+\.\s/.test(line))) return false;
+  if (gateEnd >= 0 && current.slice(gateEnd).split("\n").some((line) => /^\s*[›»](?:\s|$)/.test(line) && !/^\s*[›»]\s*\d+\.\s/.test(line))) return false;
   return (current.includes("Hooks need review") && current.includes("Trust all and continue"))
     || (/hooks? needs? review before (?:it|they) can run\./.test(current)
       && /Press t to trust(?: all)?;/.test(current));
@@ -347,7 +348,7 @@ function looksLikeCodexHookReviewPrompt(paneContent: string): boolean {
 function looksLikeCodexModelSelectionPrompt(paneContent: string): boolean {
   const recentLines = paneContent.split("\n").slice(-20);
   const numberedModelOptions = recentLines.filter((line) => (
-    /^\s*(?:›\s*)?\d+\.\s+/.test(line)
+    /^\s*(?:[›»]\s*)?\d+\.\s+/.test(line)
     && /\bgpt-[\w.-]+\b/i.test(line)
   ));
 

@@ -30,6 +30,47 @@ describe("native resume probe", () => {
     expect(result.status).toBe("resumed");
   });
 
+  it("recognizes the Codex 0.153 composer marker under the OpenRig shell wrapper", () => {
+    const paneContent = [
+      "╭─────────────────────────────────────────────────╮",
+      "│ >_ OpenAI Codex (v0.153.4)                      │",
+      "│ model:     gpt-6-astra ultra   /model to change │",
+      "╰─────────────────────────────────────────────────╯",
+      "• You have 3 usage limit resets available. Run /usage to use one.",
+      "» Ask Codex to do anything",
+      "  gpt-6-astra ultra · ~/Documents/openrig",
+    ].join("\n");
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "bash", paneContent })).toMatchObject({
+      status: "resumed", code: "active_runtime",
+    });
+  });
+
+  it("clears an old Codex hook-review panel after the newer » conversation prompt", () => {
+    const paneContent = [
+      "OpenAI Codex (v0.153.4)",
+      "Hooks need review",
+      "2 hooks are new or changed.",
+      "Press t to trust; esc to go back",
+      "» Ask Codex to do anything",
+      "  gpt-6-astra ultra · ~/Documents/openrig",
+    ].join("\n");
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "bash", paneContent })).toMatchObject({
+      status: "resumed", code: "active_runtime",
+    });
+  });
+
+  it("keeps a numbered » model menu classified as a gate, not a conversation", () => {
+    const paneContent = [
+      "OpenAI Codex (v0.153.4)",
+      "» 1. gpt-6-astra",
+      "  2. gpt-6-sol",
+      "  gpt-6-astra ultra · ~/Documents/openrig",
+    ].join("\n");
+    expect(assessNativeResumeProbe({ runtime: "codex", paneCommand: "bash", paneContent })).toMatchObject({
+      status: "inconclusive", code: "model_selection_gate",
+    });
+  });
+
   it("keeps a visible client/model compatibility failure distinct from a usable TUI", () => {
     const result = assessNativeResumeProbe({ runtime: "codex", paneCommand: "node",
       paneContent: "OpenAI Codex\n■ The configured model requires a\nnewer version of Codex. Please upgrade.\n› Write tests for @filename" });
