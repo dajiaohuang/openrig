@@ -95,11 +95,20 @@ function normalizeRateLimits(value) {
   for (const key of ["five_hour", "seven_day"]) {
     const window = value[key];
     if (!window || typeof window !== "object" || Array.isArray(window)) continue;
+    const resetsAt = typeof window.resets_at === "number"
+      ? unixSecondsToIso(window.resets_at)
+      : window.resets_at;
     if (typeof window.used_percentage !== "number" || !Number.isFinite(window.used_percentage)
-      || typeof window.resets_at !== "string") continue;
-    result[key] = { usedPercent: window.used_percentage, resetsAt: window.resets_at };
+      || typeof resetsAt !== "string") continue;
+    result[key] = { usedPercent: window.used_percentage, resetsAt };
   }
   return result.five_hour || result.seven_day ? result : null;
+}
+
+function unixSecondsToIso(value) {
+  if (!Number.isFinite(value)) return null;
+  const date = new Date(value * 1000);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
 function writeJsonAtomic(outputPath, value) {

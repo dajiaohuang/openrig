@@ -123,6 +123,41 @@ describe("Claude Status Line Collector Script", () => {
     expect(cache.accountRef).toBeUndefined();
   });
 
+  it("converts Claude Unix-second reset times to ISO strings", () => {
+    const contextDir = join(tmpDir, "context");
+    const usageDir = join(tmpDir, "provider-usage");
+    const statusLine = JSON.parse(VALID_STATUS_LINE);
+    statusLine.rate_limits.five_hour.resets_at = 1_770_000_000;
+    statusLine.rate_limits.seven_day.resets_at = 1_770_086_400;
+    const result = spawnSync("node", [collectorPath, contextDir, usageDir], {
+      encoding: "utf-8",
+      input: JSON.stringify(statusLine),
+    });
+
+    expect(result.status).toBe(0);
+    const cache = JSON.parse(readFileSync(join(usageDir, "dev-impl@test.json"), "utf-8"));
+    expect(cache.rateLimits).toEqual({
+      five_hour: { usedPercent: 42, resetsAt: new Date(1_770_000_000_000).toISOString() },
+      seven_day: { usedPercent: 7, resetsAt: new Date(1_770_086_400_000).toISOString() },
+    });
+  });
+
+  it("omits rate-limit windows with out-of-range numeric reset times", () => {
+    const contextDir = join(tmpDir, "context");
+    const usageDir = join(tmpDir, "provider-usage");
+    const statusLine = JSON.parse(VALID_STATUS_LINE);
+    statusLine.rate_limits.five_hour.resets_at = Number.MAX_VALUE;
+    const result = spawnSync("node", [collectorPath, contextDir, usageDir], {
+      encoding: "utf-8",
+      input: JSON.stringify(statusLine),
+    });
+
+    expect(result.status).toBe(0);
+    const cache = JSON.parse(readFileSync(join(usageDir, "dev-impl@test.json"), "utf-8"));
+    expect(cache.rateLimits.five_hour).toBeUndefined();
+    expect(cache.rateLimits.seven_day.resetsAt).toBe("2026-08-10T00:00:00.000Z");
+  });
+
   // T3b: No output path arg — silent exit
   it("silently exits with no output path argument", () => {
     // Should not throw
