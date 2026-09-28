@@ -89,6 +89,21 @@ describe("rig view CLI (PL-004 Phase B)", () => {
     expect(call!.path).toContain("limit=50");
   });
 
+  it("show execution passes project and mission scopes to the daemon", async () => {
+    const { deps, calls } = makeDeps();
+    const program = createProgram({ viewDeps: deps });
+    program.exitOverride();
+    await program.parseAsync([
+      "node", "rig", "view", "show", "execution",
+      "--project", "alpha",
+      "--mission", "release-next",
+      "--json",
+    ]);
+    const call = calls.find((c) => c.method === "GET" && c.path.startsWith("/api/views/execution"));
+    expect(call?.path).toContain("project=alpha");
+    expect(call?.path).toContain("mission=release-next");
+  });
+
   it("show without query params constructs path without ?", async () => {
     const { deps, calls } = makeDeps({
       routes: { "GET /api/views/founder": { status: 200, data: { rowCount: 0 } } },
