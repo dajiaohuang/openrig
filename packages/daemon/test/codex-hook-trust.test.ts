@@ -12,6 +12,7 @@
 // key_source (canonicalized config path) and positional indices are PROVISIONAL. A mismatch is
 // fail-safe (gate reappears + Layer-2 keystroke floor), never a false-trusted run.
 import { describe, it, expect, vi } from "vitest";
+import nodeFs from "node:fs";
 import {
   CodexRuntimeAdapter,
   computeCodexHookTrust,
@@ -174,6 +175,22 @@ describe("OPR.0.4.3.33 — provisioning-seam coupling (ensureCodexActivityHooks 
     // scope: exactly 4 hooks.state tables, no more, no wildcard/blanket entry
     expect(cfg.match(/^\[hooks\.state\./gm)?.length).toBe(4);
     expect(cfg).not.toContain('[hooks.state."*"]');
+  });
+
+  it("uses native canonical path casing for Codex hook trust keys", () => {
+    const canonicalConfigPath = "C:\\Users\\Test\\.codex\\config.toml";
+    const nativeRealpath = vi.spyOn(nodeFs.realpathSync, "native").mockReturnValue(canonicalConfigPath);
+    try {
+      const fakeFs = mockCodexFs({ [RELAY]: "// relay" });
+      makeAdapter(fakeFs).ensureCodexActivityHooks();
+      const configPath = Object.keys(fakeFs._store).find((path) => path.endsWith("config.toml"))!;
+      const config = fakeFs._store[configPath]!;
+
+      expect(nativeRealpath).toHaveBeenCalledWith(configPath);
+      expect(config).toContain(`[hooks.state.${JSON.stringify(`${canonicalConfigPath}:session_start:0:0`)}]`);
+    } finally {
+      nativeRealpath.mockRestore();
+    }
   });
 
   it("is idempotent — re-running produces byte-identical config (no duplicate trust tables)", () => {

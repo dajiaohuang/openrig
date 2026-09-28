@@ -198,7 +198,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   private applyCodexActivityHookTrust(content: string, configPath: string, relay: string): string {
     let keySource = configPath;
     try {
-      keySource = fs.realpathSync(configPath);
+      keySource = fs.realpathSync.native(configPath);
     } catch {
       // config.toml not on the real filesystem (first write / unit-test mock fs) — the plain
       // absolute path is the honest best guess; a canonicalization delta is fail-safe (gate reappears).
