@@ -199,6 +199,16 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     });
     expect(snap.hosts[0]?.rigs[0]?.pods[0]?.agents[0]).toMatchObject({ nodeId: "01JNODEIMPL" });
   });
+  it("leaves health unassessed when a focused view skips the projection read", async () => {
+    const context = { section: "topology" as const, viewTab: "table" as const, drill: [] };
+    const snap = await hydrateSnapshot(fixtureClient(), undefined, undefined, undefined, undefined, context);
+    expect(snap.health).toBeUndefined();
+  });
+  it("marks health unavailable when the selected health view read fails", async () => {
+    const context = { section: "topology" as const, viewTab: "health" as const, drill: [] };
+    const snap = await hydrateSnapshot(fixtureClient({ "/api/health?limit=200": { status: 503 } }), undefined, undefined, undefined, undefined, context);
+    expect(snap.health).toMatchObject({ availability: "unavailable", records: [] });
+  });
   it("requests the currently selected mission rather than reusing the daemon default", async () => {
     const mission = "release-next";
     const route = `/api/views/execution?mission=${mission}`;

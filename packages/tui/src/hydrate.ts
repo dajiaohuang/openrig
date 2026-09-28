@@ -446,11 +446,12 @@ export async function hydrateSnapshot(
   const wantsRecent = wantsTopologyScope && (!topologyLeaf || topologyLeaf.kind === "host" || topologyLeaf.kind === "rig");
   const focusedTopology = !!viewContext && wantsTopologyScope && viewContext.viewTab !== "pulse";
   const broadReads = !readingOnly && !focusedTopology && !wantsConnections;
+  const healthRequested = broadReads || viewContext?.viewTab === "health";
   const wantsGraph = wantsTopologyScope && (!viewContext || viewContext.viewTab === "graph");
 
   const [instanceHealth, healthProjection, agg, summaries, library, review, streamItems, attention, blocked, inProgress, pending, recentlyFinished, scopesRead, executionRead, sliceDetailRead, connectionsRead] = await Promise.all([
     safe<InstanceHealthRead>("health", () => client.health()),
-    !(broadReads || viewContext?.viewTab === "health") ? Promise.resolve(null) : safe<HealthProjectionRead>("health-findings", () => client.healthFindings()),
+    !healthRequested ? Promise.resolve(null) : safe<HealthProjectionRead>("health-findings", () => client.healthFindings()),
     !broadReads ? Promise.resolve(null) : safe<AttentionAggregateRead>("attention-aggregate", () => client.attentionAggregate()),
     readingOnly ? Promise.resolve(null) : safe<RigSummaryRead[]>("rigs-summary", () => client.rigsSummary()),
     (wantsSpecs || wantsConnections) ? safe<SpecLibraryRead[]>("specs-library", () => client.specsLibrary()) : Promise.resolve(null),
@@ -719,7 +720,7 @@ export async function hydrateSnapshot(
           truncated: healthProjection.truncated,
           records: healthProjection.records,
         }
-      : { availability: "unavailable", evaluatedAt: null, total: 0, truncated: false, records: [] },
+      : healthRequested ? { availability: "unavailable", evaluatedAt: null, total: 0, truncated: false, records: [] } : undefined,
     hosts: [localHost, ...remoteHosts],
     specs,
     specsLoaded: wantsSpecs && library != null,
