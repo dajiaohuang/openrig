@@ -28,8 +28,8 @@
 //    to shell anyway).
 //  - The composer's `paneCommand` is a SHELL string (`tmux attach -r -t 's'`,
 //    `ssh 'dest' tmux attach …`); the pane node's `command` is an ARGV array —
-//    so it is carried as `["sh", "-c", paneCommand]`, preserving the composed
-//    quoting byte-for-byte without the adapter re-parsing shell.
+//    it is carried through `sh -c` with Herdr's fixed Claude/Codex detection
+//    hint when the live runtime is known, without re-parsing shell quoting.
 //  - Liveness/availability = the socket `ping` (is the multiplexer's OWN
 //    control socket answering — NOT a daemon server ping; HERDR-FINDINGS #3's
 //    intent, carried to the socket transport). No "layout command" probe: the
@@ -111,6 +111,11 @@ function blankPane(): HerdrPaneNode {
   return { type: "pane", label: "", command: ["sh"] };
 }
 
+function herdrPaneCommand(pane: ComposedPane): string {
+  const agent = pane.runtime === "claude-code" ? "claude" : pane.runtime === "codex" ? "codex" : null;
+  return agent ? `env HERDR_AGENT=${agent} ${pane.paneCommand}` : pane.paneCommand;
+}
+
 /**
  * Build the EQUAL auto-grid layout tree for one page of panes. PURE. The grid
  * shape matches the UI TerminalLauncher `suggestLayout` exactly —
@@ -119,7 +124,8 @@ function blankPane(): HerdrPaneNode {
  * every cell is the same size; blanks are layout filler only — they are never
  * reported as opened seats. Each real leaf runs the composer's shell
  * `paneCommand` via `["sh","-c",…]` so the composed quoting (read-only `-r`,
- * ssh-wrap) is preserved untouched. Rows are built as equal `right` strips,
+ * ssh-wrap) is preserved; a known Claude/Codex runtime adds Herdr's detection
+ * hint. Rows are built as equal `right` strips,
  * then combined with equal `down` strips.
  */
 export function buildGridRoot(panes: ComposedPane[]): { root: HerdrLayoutNode; blanks: number; columns: number; rows: number } {
@@ -129,7 +135,7 @@ export function buildGridRoot(panes: ComposedPane[]): { root: HerdrLayoutNode; b
   const leaves: HerdrLayoutNode[] = panes.map((pane) => ({
     type: "pane",
     label: pane.label,
-    command: ["sh", "-c", pane.paneCommand],
+    command: ["sh", "-c", herdrPaneCommand(pane)],
   }));
   for (let i = 0; i < blanks; i++) leaves.push(blankPane());
   const rowStrips: HerdrLayoutNode[] = [];

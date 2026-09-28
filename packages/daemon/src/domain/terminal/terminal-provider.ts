@@ -17,14 +17,17 @@
 /**
  * A single provider-neutral pane, fully composed. `paneCommand` is the exact
  * shell command the provider runs inside the pane (e.g. `tmux attach -t 's'`
- * or `ssh host tmux attach -r -t 's'`); the provider does not modify it.
+ * or `ssh host tmux attach -r -t 's'`). Providers may use the optional runtime
+ * metadata when rendering their surface.
  */
 export interface ComposedPane {
   /** Canonical session name of the seat this pane attaches to. */
   seat: string;
+  /** Runtime recorded for a live seat, when available. */
+  runtime?: string;
   /** Human pane label — `<agent> · <slice>` per AC-7. */
   label: string;
-  /** The provider-neutral shell command the pane runs. Composed upstream. */
+  /** Provider-neutral shell command; a provider may wrap it using runtime metadata. */
   paneCommand: string;
   /** True when the attach is view-only (`tmux attach -r`) — cross-rig / saved read-only. */
   readOnly: boolean;

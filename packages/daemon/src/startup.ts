@@ -1641,11 +1641,13 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     const toLiveSeatRow = (e: {
       canonicalSessionName: string | null;
       attachmentType?: "tmux" | "external_cli" | null;
+      runtime?: string | null;
       rigName: string;
       logicalId: string;
     }) => ({
       canonicalSessionName: e.canonicalSessionName,
       attachmentType: e.attachmentType ?? null,
+      runtime: e.runtime ?? null,
       tmuxSession: e.canonicalSessionName,
       rigName: e.rigName,
       logicalId: e.logicalId,

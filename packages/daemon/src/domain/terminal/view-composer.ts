@@ -41,6 +41,8 @@ export const PANES_PER_PAGE = 9;
 export interface ViewMemberInput {
   /** Canonical session name of the seat. */
   seat: string;
+  /** Runtime recorded for a live seat; absent for saved members without inventory data. */
+  runtime?: string | null;
   /** Pane label — `<agent> · <slice>` (AC-7). */
   label: string;
   /** The tmux session to attach to (may be null if the seat has no tmux binding). */
@@ -149,6 +151,7 @@ export function composeView(
       }
       opened.push({
         seat: m.seat,
+        ...(m.runtime ? { runtime: m.runtime } : {}),
         label: m.label,
         paneCommand: `ssh ${shellQuote(dest)} tmux attach ${attachFlag}-t ${shellQuote(m.tmuxSession)}`,
         readOnly: m.readOnly,
@@ -175,6 +178,7 @@ export function composeView(
     }
     opened.push({
       seat: m.seat,
+      ...(m.runtime ? { runtime: m.runtime } : {}),
       label: m.label,
       paneCommand: `tmux attach ${attachFlag}-t ${shellQuote(m.tmuxSession)}`,
       readOnly: m.readOnly,

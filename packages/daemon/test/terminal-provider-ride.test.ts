@@ -191,6 +191,29 @@ describe("view-composer partition vectors", () => {
   it("chunkPanes rejects a non-positive page size", () => {
     expect(() => chunkPanes([], 0)).toThrow();
   });
+
+  it("carries live Claude and Codex runtimes into Herdr tile hints but leaves terminal seats unchanged", () => {
+    const members = deriveViewMembers([
+      { canonicalSessionName: "claude@rig", attachmentType: "tmux", runtime: "claude-code" },
+      { canonicalSessionName: "codex@rig", attachmentType: "tmux", runtime: "codex" },
+      { canonicalSessionName: "operator@rig", attachmentType: "tmux", runtime: "terminal" },
+    ]);
+    const view = composeView("rig:rig", members, ctxWith([]));
+    const grid = buildGridRoot(view.opened).root;
+    const panes: HerdrPaneNode[] = [];
+    const collect = (node: HerdrLayoutNode) => {
+      if (node.type === "pane") panes.push(node);
+      else { collect(node.first); collect(node.second); }
+    };
+    collect(grid);
+
+    expect(panes.filter((pane) => pane.label).map((pane) => pane.command)).toEqual([
+      ["sh", "-c", "env HERDR_AGENT=claude tmux attach -t 'claude@rig'"],
+      ["sh", "-c", "env HERDR_AGENT=codex tmux attach -t 'codex@rig'"],
+      ["sh", "-c", "tmux attach -t 'operator@rig'"],
+    ]);
+    expect(panes.at(-1)?.command).toEqual(["sh"]);
+  });
 });
 
 describe("terminal-views store — round-trip byte-stable + atomic write + A3", () => {
