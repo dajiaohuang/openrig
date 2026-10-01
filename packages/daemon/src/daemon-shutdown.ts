@@ -2,6 +2,7 @@ import { writeFileSync, renameSync } from "node:fs";
 
 export const DAEMON_SHUTDOWN_TIMEOUT_MS = 10_000;
 export const DAEMON_STOP_WAIT_MS = DAEMON_SHUTDOWN_TIMEOUT_MS + 2_000;
+export const DAEMON_HTTP_CONNECTION_GRACE_MS = 250;
 export const DAEMON_SHUTDOWN_RECEIPT = "daemon-shutdown.json";
 export interface DaemonShutdownReceipt {
   schema: "openrig.daemon-shutdown/v1";
@@ -11,6 +12,34 @@ export interface DaemonShutdownReceipt {
   outcome: "clean" | "failed" | "timed-out";
   phase: string;
   failures: Array<{ phase: string; error: string }>;
+}
+
+interface ServerShutdownHandle {
+  close(callback: (error?: Error) => void): unknown;
+  closeIdleConnections?: () => void;
+  closeAllConnections?: () => void;
+}
+
+/** Stop accepting requests, drain idle keep-alive sockets, then end remaining
+ * active HTTP streams (for example SSE clients) before completing shutdown. */
+export function closeHttpServer(server: ServerShutdownHandle, graceMs = DAEMON_HTTP_CONNECTION_GRACE_MS): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const forceCloseTimer = setTimeout(() => server.closeAllConnections?.(), graceMs);
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(forceCloseTimer);
+      if (error) reject(error);
+      else resolve();
+    };
+    try {
+      server.close(finish);
+      server.closeIdleConnections?.();
+    } catch (error) {
+      finish(error as Error);
+    }
+  });
 }
 
 /** One budget for the existing sequential cleanup, including its first await.

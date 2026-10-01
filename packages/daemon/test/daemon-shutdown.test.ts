@@ -1,11 +1,13 @@
 import fs from "node:fs";
+import { createServer, get as httpGet } from "node:http";
+import { once } from "node:events";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
-import { createDaemonShutdown, DAEMON_SHUTDOWN_TIMEOUT_MS } from "../src/daemon-shutdown.js";
+import { closeHttpServer, createDaemonShutdown, DAEMON_SHUTDOWN_TIMEOUT_MS } from "../src/daemon-shutdown.js";
 
 const dirs: string[] = [];
 afterEach(() => { vi.useRealTimers(); for (const p of dirs.splice(0)) fs.rmSync(p, { recursive: true, force: true }); });
@@ -16,6 +18,33 @@ function fixture(phases: Array<[string, () => unknown]>) {
   const shutdown = createDaemonShutdown({ phases, markClean, exit, log, receiptPath });
   return { shutdown, exit, markClean, log, receipt: () => JSON.parse(fs.readFileSync(receiptPath, "utf8")) };
 }
+it("closes active event streams after a short grace period", async () => {
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    response.write("data: connected\n\n");
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Expected an ephemeral TCP address");
+
+  let responseClosed: Promise<unknown> | undefined;
+  const response = await new Promise<import("node:http").IncomingMessage>((resolve, reject) => {
+    const request = httpGet(`http://127.0.0.1:${address.port}/events`);
+    request.once("error", reject);
+    request.once("response", (response) => {
+      response.on("error", () => {});
+      responseClosed = new Promise<void>((resolve) => response.once("close", resolve));
+      resolve(response);
+    });
+  });
+
+  await closeHttpServer(server, 20);
+  await responseClosed;
+  expect(response.complete).toBe(false);
+  expect(server.listening).toBe(false);
+});
+
 it("writes clean lifecycle evidence only after every phase has drained", async () => {
   vi.useFakeTimers(); let release!: () => void;
   const f = fixture([["connections", () => new Promise<void>(r => { release = r; })], ["recorder", () => {}]]);
