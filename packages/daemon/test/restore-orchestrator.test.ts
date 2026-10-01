@@ -3016,6 +3016,28 @@ describe("RestoreOrchestrator", () => {
       expect(tmux.sendText).not.toHaveBeenCalled();
     });
 
+    it("reconciles a headerless Claude prompt when exact resume-token lineage is verified", async () => {
+      const tmux = mockTmuxForReconciler();
+      vi.mocked(tmux.hasSession).mockResolvedValue(true);
+      vi.mocked(tmux.getPaneCommand).mockResolvedValue("2.1.283");
+      vi.mocked(tmux.capturePaneContent).mockResolvedValue([
+        "Restored conversation",
+        "❯",
+        "⏵⏵ bypass permissions on (shift+tab to cycle)",
+      ].join("\n"));
+      const seeded = seedFailedAttempt({ restoreOutcome: "failed", withResumeToken: true });
+
+      const result = await createOrchestrator({
+        tmux,
+        listProcesses: exactClaudeLineage(),
+      }).reconcileNodeRuntimeTruth(seeded.rig.id, seeded.nodeId);
+
+      expect(result).toMatchObject({ ok: true, to: "operator_recovered" });
+      expect(db.prepare("SELECT * FROM events WHERE type = 'restore.outcome_reconciled'").all()).toHaveLength(1);
+      expect(tmux.sendKeys).not.toHaveBeenCalled();
+      expect(tmux.sendText).not.toHaveBeenCalled();
+    });
+
     it("upgrades failed -> operator_recovered when ALL four preconditions hold; emits audit event", async () => {
       const tmux = mockTmuxForReconciler();
       (tmux.hasSession as ReturnType<typeof vi.fn>).mockResolvedValue(true);

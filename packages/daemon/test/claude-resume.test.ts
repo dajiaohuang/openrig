@@ -15,12 +15,14 @@ function mockTmux(overrides?: {
   sendKeys?: (target: string, keys: string[]) => Promise<TmuxResult>;
   getPaneCommand?: (target: string) => Promise<string | null>;
   capturePaneContent?: (target: string, lines?: number) => Promise<string | null>;
+  getPanePid?: (target: string) => Promise<number | null>;
 }) {
   return {
     sendText: overrides?.sendText ?? vi.fn(async () => ({ ok: true as const })),
     sendKeys: overrides?.sendKeys ?? vi.fn(async () => ({ ok: true as const })),
     getPaneCommand: overrides?.getPaneCommand ?? vi.fn(async () => "claude"),
     capturePaneContent: overrides?.capturePaneContent ?? vi.fn(async () => ""),
+    getPanePid: overrides?.getPanePid ?? vi.fn(async () => null),
     createSession: async () => ({ ok: true as const }),
     killSession: async () => ({ ok: true as const }),
     listSessions: async () => [],
@@ -333,6 +335,52 @@ describe("ClaudeResumeAdapter", () => {
       const result = await adapter.resume("r99-demo1-lead", "claude_name", "my-session", "/repo");
 
       expect(result).toEqual({ ok: true, appliedLaunch: CLAUDE_FLOOR_EFFECT });
+    });
+
+    it("accepts a headerless bypass-mode prompt only with exact resume process lineage", async () => {
+      const tmux = mockTmux({
+        getPanePid: vi.fn(async () => 1234),
+        getPaneCommand: vi.fn(async () => "2.1.283"),
+        capturePaneContent: vi.fn(async () => [
+          "Restored conversation",
+          "❯",
+          "⏵⏵ bypass permissions on (shift+tab to cycle)",
+        ].join("\n")),
+      });
+      const adapter = new ClaudeResumeAdapter(tmux, {
+        pollMs: 0,
+        maxWaitMs: 0,
+        sleep: async () => {},
+        listProcesses: async () => [
+          { pid: 1234, ppid: 1, pgid: 1234, tpgid: 1235, command: "bash", executableName: "bash", startedAt: "Sat Jan  1 12:00:00 2000" },
+          { pid: 1235, ppid: 1234, pgid: 1235, tpgid: 1235, command: "claude --permission-mode acceptEdits --resume resume-id", executableName: "claude", startedAt: "Sat Jan  1 12:00:00 2000" },
+        ],
+      });
+
+      const result = await adapter.resume("r99-demo1-lead", "claude_id", "resume-id", "/repo");
+
+      expect(result).toEqual({ ok: true, appliedLaunch: CLAUDE_FLOOR_EFFECT });
+    });
+
+    it("does not accept the same prompt when the native process carries another resume token", async () => {
+      const tmux = mockTmux({
+        getPanePid: vi.fn(async () => 1234),
+        getPaneCommand: vi.fn(async () => "2.1.283"),
+        capturePaneContent: vi.fn(async () => "Restored conversation\n❯\n⏵⏵ bypass permissions on"),
+      });
+      const adapter = new ClaudeResumeAdapter(tmux, {
+        pollMs: 0,
+        maxWaitMs: 0,
+        sleep: async () => {},
+        listProcesses: async () => [
+          { pid: 1234, ppid: 1, pgid: 1234, tpgid: 1235, command: "bash", executableName: "bash", startedAt: "Sat Jan  1 12:00:00 2000" },
+          { pid: 1235, ppid: 1234, pgid: 1235, tpgid: 1235, command: "claude --permission-mode acceptEdits --resume another-session", executableName: "claude", startedAt: "Sat Jan  1 12:00:00 2000" },
+        ],
+      });
+
+      const result = await adapter.resume("r99-demo1-lead", "claude_id", "resume-id", "/repo");
+
+      expect(result).toMatchObject({ ok: false, code: "resume_failed" });
     });
   });
 });

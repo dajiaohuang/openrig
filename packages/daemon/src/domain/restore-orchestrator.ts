@@ -1827,7 +1827,14 @@ export class RestoreOrchestrator {
     }
     const paneCommand = await this.tmuxAdapter.getPaneCommand(identity.pane);
     const paneContent = (await this.tmuxAdapter.capturePaneContent(identity.pane, 40)) ?? "";
-    const probe = assessNativeResumeProbe({ runtime, paneCommand, paneContent });
+    const probe = assessNativeResumeProbe({
+      runtime,
+      paneCommand,
+      paneContent,
+      // rebindAndVerifyPaneIdentity above already proved the exact persisted
+      // resume token inside this pane's live native-process lineage.
+      ...(runtime === "claude-code" ? { claudeResumeIdentityVerified: true } : {}),
+    });
     const fgProcess = runtime === "claude-code" ? "claude" as const : runtime === "codex" ? "codex" as const : null;
     if (!fgProcess) {
       return { ok: false, code: "fg_process_not_runtime", detail: `Node runtime is ${runtime ?? "unknown"}, not claude/codex.` };
