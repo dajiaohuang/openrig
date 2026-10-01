@@ -154,7 +154,9 @@ export class ClaudeResumeAdapter {
     // The exact --resume identity is stronger evidence than a pane command or
     // a version/footer heuristic. Use it only with Claude's interactive prompt
     // visible, and after the untrusted screen classifiers have had their say.
-    if (/(^|\n)\s*❯/.test(finalContent) && finalProbe.status === "inconclusive") {
+    const mayBeWrappedComposer = finalProbe.status === "inconclusive"
+      || (finalProbe.status === "failed" && finalProbe.code === "returned_to_shell");
+    if (/(^|\n)\s*❯/.test(finalContent) && mayBeWrappedComposer) {
       const identity = await verifyClaudePaneProcess({
         target: tmuxSessionName,
         tmux: this.tmux,

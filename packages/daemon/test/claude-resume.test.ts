@@ -337,10 +337,10 @@ describe("ClaudeResumeAdapter", () => {
       expect(result).toEqual({ ok: true, appliedLaunch: CLAUDE_FLOOR_EFFECT });
     });
 
-    it("accepts a headerless bypass-mode prompt only with exact resume process lineage", async () => {
+    it.each(["2.1.283", "sh"])("accepts a headerless bypass-mode prompt with exact resume lineage behind %s", async (paneCommand) => {
       const tmux = mockTmux({
         getPanePid: vi.fn(async () => 1234),
-        getPaneCommand: vi.fn(async () => "2.1.283"),
+        getPaneCommand: vi.fn(async () => paneCommand),
         capturePaneContent: vi.fn(async () => [
           "Restored conversation",
           "❯",
@@ -362,10 +362,13 @@ describe("ClaudeResumeAdapter", () => {
       expect(result).toEqual({ ok: true, appliedLaunch: CLAUDE_FLOOR_EFFECT });
     });
 
-    it("does not accept the same prompt when the native process carries another resume token", async () => {
+    it.each([
+      ["2.1.283", "resume_failed"],
+      ["sh", "retry_fresh"],
+    ] as const)("does not accept the prompt behind %s when the native process carries another resume token", async (paneCommand, expectedCode) => {
       const tmux = mockTmux({
         getPanePid: vi.fn(async () => 1234),
-        getPaneCommand: vi.fn(async () => "2.1.283"),
+        getPaneCommand: vi.fn(async () => paneCommand),
         capturePaneContent: vi.fn(async () => "Restored conversation\n❯\n⏵⏵ bypass permissions on"),
       });
       const adapter = new ClaudeResumeAdapter(tmux, {
@@ -380,7 +383,7 @@ describe("ClaudeResumeAdapter", () => {
 
       const result = await adapter.resume("r99-demo1-lead", "claude_id", "resume-id", "/repo");
 
-      expect(result).toMatchObject({ ok: false, code: "resume_failed" });
+      expect(result).toMatchObject({ ok: false, code: expectedCode });
     });
   });
 });
