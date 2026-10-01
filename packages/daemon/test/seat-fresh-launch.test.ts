@@ -376,6 +376,22 @@ describe("SeatLifecycleService.launchFresh", () => {
       expect(sessionRegistry.getBindingForNode(seat.node.id)?.tmuxPane).toBe("%fresh");
     });
 
+    it("reopens an empty tmux server after an explicit stop before a fresh launch", async () => {
+      const seat = seedSeat();
+      const server = modelServerLifetime();
+
+      const stopped = await service.stopSeat({ seatRef: seat.sessionName, reason: "operator requested stop" });
+      expect(stopped).toMatchObject({ ok: true });
+      expect(server).toEqual({ up: false, starts: 0 });
+
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "start a new occupant" });
+
+      expect(result).toMatchObject({ ok: true, status: "ready", sessionName: seat.sessionName });
+      expect(server).toEqual({ up: true, starts: 1 });
+      expect(tmux.createSession).toHaveBeenCalledTimes(1);
+      expect(alive.has(seat.sessionName)).toBe(true);
+    });
+
     it("proves older non-terminal rows absent on the restored server before superseding them", async () => {
       const seat = seedSeat({ clean: true });
       const older = sessionRegistry.registerSession(seat.node.id, "r00-dev-impl@fresh-rig");

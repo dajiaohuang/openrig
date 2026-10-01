@@ -501,10 +501,41 @@ export class SeatLifecycleService {
     ).all(node.id) as Array<{ id: string }>).map((row) => row.id);
     const retiringGeneration = this.sessionRegistry.currentOccupantTenure(node.id)?.generationUuid ?? null;
 
-    const canonicalProbe = await this.probeLiveness(
+    let canonicalProbe = await this.probeLiveness(
       canonicalSessionName,
       "fresh launch refuses rather than overwrite a possibly-live canonical session",
     );
+    // `rig seat stop` persists an exited row after killing its managed session.
+    // When that was the last tmux session, tmux exits too, so the next classified
+    // probe sees unavailable transport instead of positive absence. Reopen an
+    // empty server only when the persisted state proves this seat's managed
+    // occupant was deliberately stopped and no other managed row remains live.
+    // The probe below still decides absence; a recreated session or failed
+    // transport remains a refusal.
+    if ("code" in canonicalProbe) {
+      const latest = this.latestSession(node.id);
+      const hasCurrentBinding = this.sessionRegistry.getBindingForNode(node.id) !== null;
+      const stoppedManagedOccupant = latest !== null
+        && latest.session_name === canonicalSessionName
+        && latest.status === "exited"
+        && latest.origin !== "claimed"
+        && !hasCurrentBinding
+        && this.nonTerminalSessions(node.id).length === 0;
+      if (stoppedManagedOccupant) {
+        try {
+          const restored = await this.tmuxAdapter.startServer();
+          if (restored.ok) {
+            canonicalProbe = await this.probeLiveness(
+              canonicalSessionName,
+              "fresh launch refuses rather than overwrite a possibly-live canonical session",
+            );
+          }
+        } catch {
+          // Keep the original classified refusal when the transport cannot be
+          // restored; never translate a failed start into absence.
+        }
+      }
+    }
     if ("code" in canonicalProbe) return canonicalProbe;
     if (canonicalProbe.state === "present") {
       const currentSession = this.latestSession(node.id);
