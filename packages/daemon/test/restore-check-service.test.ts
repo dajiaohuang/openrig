@@ -875,6 +875,28 @@ describe("RestoreCheckService", () => {
     expect(hook?.evidence).toContain(relayPath);
   });
 
+  it("does not accept a similarly named command as the projected Claude activity hook", () => {
+    const cwd = path.join(os.tmpdir(), "restore-check-activity-seat-lookalike");
+    const settingsPath = path.join(cwd, ".claude", "settings.local.json");
+    const relayPath = path.join(cwd, ".openrig", "hooks", "scripts", "activity-relay.cjs");
+    const service = new RestoreCheckService(mockDeps({
+      getNodeInventory: () => [claudeNode({ cwd })],
+      getStartupContext: () => startupContextProbe({ projectionEntries: [{
+        absolutePath: "/source/openrig-core", effectiveId: "shared:openrig-core",
+        category: "runtime_resource", resourceType: "claude_activity_hooks",
+      }] }),
+      getClaudeActivityHookEvents: () => ["SessionStart"],
+      exists: (candidate) => candidate === settingsPath || candidate === relayPath || candidate.endsWith("host-infra.json"),
+      readFile: (candidate) => candidate === settingsPath
+        ? JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", command: `node '${relayPath}.backup'` }] }] } })
+        : VALID_HOST_INFRA_DECLARATION,
+    }));
+
+    const hook = service.check({}).checks.find((entry) => entry.check === "seat.dev-impl@test-rig.hooks");
+    expect(hook?.status).toBe("yellow");
+    expect(hook?.evidence).toContain("SessionStart");
+  });
+
   it("warns when a selected Claude activity hook event is not projected", () => {
     const cwd = path.join(os.tmpdir(), "restore-check-activity-seat-partial");
     const settingsPath = path.join(cwd, ".claude", "settings.local.json");

@@ -1,6 +1,7 @@
 import { existsSync, accessSync, constants } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 import { getCompatibleOpenRigPath } from "../openrig-compat.js";
+import { shellQuote as quoteShellArgument } from "../adapters/shell-quote.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 
 // --- Types ---
@@ -1034,7 +1035,7 @@ export class RestoreCheckService {
       if (!isRecord(entry) || !Array.isArray(entry["hooks"])) return false;
       return entry["hooks"].some((hook) => (
         isRecord(hook) && typeof hook["command"] === "string" &&
-        hook["command"].startsWith("node ") && hook["command"].includes(relayPath)
+        hook["command"] === `node ${quoteShellArgument(relayPath)}`
       ));
     });
   }
