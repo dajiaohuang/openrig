@@ -39,8 +39,16 @@ export async function pack(stagingDir: string, outputPath: string): Promise<stri
       gzip: { level: 9 },
       file: outputPath,
       cwd: stagingDir,
-      portable: true, // Normalizes uid/gid/mode
+      portable: true, // Omits machine-specific owner metadata
       mtime: new Date("2026-01-01T00:00:00Z"), // Fixed mtime for determinism
+      // portable mode defaults file permissions to 0644. Retain only the
+      // executable distinction from the staged file and normalize all other
+      // permission bits so equivalent bundles remain deterministic.
+      onWriteEntry: (entry) => {
+        if (entry.type === "File" && entry.stat) {
+          entry.stat.mode = (entry.stat.mode & 0o111) !== 0 ? 0o755 : 0o644;
+        }
+      },
     },
     allFiles,
   );
