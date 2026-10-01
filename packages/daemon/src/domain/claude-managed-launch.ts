@@ -54,6 +54,13 @@ export class ClaudeManagedLaunch {
     // Session storage needs a directory, but exporting the default changes
     // Claude's global config selection. Preserve an unset native selection.
     if (CLAUDE_CONFIG_DIR !== undefined) env.CLAUDE_CONFIG_DIR = configDir;
+    for (const key of ["TERM", "COLORTERM", "LANG"]) {
+      const value = this.rendererEnv[key];
+      if (value !== undefined) env[key] = value;
+    }
+    for (const [key, value] of Object.entries(this.rendererEnv)) {
+      if (/^LC_[A-Z0-9_]+$/.test(key) && value !== undefined) env[key] = value;
+    }
     if (claudeClassicRendererEnvPrefix(this.rendererEnv)) env.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN = "1";
     let executable: string | undefined;
     for (const dir of search) {
