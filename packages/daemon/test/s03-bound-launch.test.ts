@@ -104,8 +104,12 @@ if (process.argv.includes('--help')) {
       TERM: "tmux-256color", COLORTERM: "truecolor", LANG: "en_US.UTF-8",
       LC_CTYPE: "en_US.UTF-8", LC_MESSAGES: "en_US.UTF-8",
     }).map(([key, value]) => [key, terminal === "empty" ? "" : value])));
+    // Some shells initialize TERM; model absent pane variables before expansion.
+    const paneCommand = terminal === "absent"
+      ? `unset TERM COLORTERM LANG LC_CTYPE LC_MESSAGES; ${command}`
+      : command;
     const stdout = await new Promise<string>((resolve, reject) => {
-      native.execFile("/bin/sh", ["-c", command], { encoding: "utf8", timeout: 3000,
+      native.execFile("/bin/sh", ["-c", paneCommand], { encoding: "utf8", timeout: 3000,
         env: paneEnv },
       (error, out) => error ? reject(error) : resolve(out));
     });
@@ -120,7 +124,7 @@ if (process.argv.includes('--help')) {
     if (terminal === "present") expect(launched.env).toMatchObject({ TERM: "tmux-256color", COLORTERM: "truecolor", LANG: "en_US.UTF-8",
       LC_CTYPE: "en_US.UTF-8", LC_MESSAGES: "en_US.UTF-8" });
     else for (const key of ["TERM", "COLORTERM", "LANG", "LC_CTYPE", "LC_MESSAGES"]) expect(launched.env).not.toHaveProperty(key);
-    expect(queried).not.toHaveProperty("TERM");
+    for (const key of ["TERM", "COLORTERM", "LANG", "LC_CTYPE", "LC_MESSAGES"]) expect(queried).not.toHaveProperty(key);
     expect(launched.env).not.toHaveProperty("UNAPPROVED_RENDERER_VALUE");
     expect(launched).toMatchObject({ cwd: f.cwd, args, env: {
       HOME: f.env.HOME, ANTHROPIC_API_KEY: f.env.ANTHROPIC_API_KEY, OPENRIG_HOME: f.env.OPENRIG_HOME,
