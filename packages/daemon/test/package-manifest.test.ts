@@ -34,6 +34,18 @@ function validRaw() {
 }
 
 describe("PackageManifest", () => {
+  it("rejects a role hook absent from exports but accepts the exact source", () => {
+    const raw = validRaw() as Record<string, unknown>;
+    const exports = raw.exports as Record<string, unknown>;
+    exports.hooks = [{ source: "hooks/checkpoint.yaml", supported_runtimes: ["claude-code"] }];
+    raw.roles = [{ name: "reviewer", hooks: ["hooks/missing.yaml"] }];
+    const rejected = validateManifest(raw);
+    expect(rejected.valid).toBe(false);
+    expect(rejected.errors).toContain("Role 'reviewer' references nonexistent hook: 'hooks/missing.yaml'");
+    raw.roles = [{ name: "reviewer", hooks: ["hooks/checkpoint.yaml"] }];
+    expect(validateManifest(raw).valid).toBe(true);
+  });
+
   // Test 1: Valid manifest passes validation
   it("valid manifest passes validation", () => {
     const result = validateManifest(validRaw());

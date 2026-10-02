@@ -43,6 +43,13 @@ roles:
 `);
 
 describe("RoleResolver", () => {
+  it("rejects unknown hooks even when a normalized manifest bypasses validation", () => {
+    const manifest = structuredClone(FULL_MANIFEST);
+    manifest.roles![0]!.hooks = ["hooks/missing.yaml"];
+    expect(() => resolveExports(manifest, "reviewer"))
+      .toThrow("Role 'reviewer' references nonexistent hook: 'hooks/missing.yaml'");
+  });
+
   // Test 1: Role with skills only -> referenced skills in output
   it("role with skills only -> referenced skills in output", () => {
     const result = resolveExports(FULL_MANIFEST, "full-stack");
