@@ -27,11 +27,12 @@ import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
 import { TmuxAdapter, type TmuxResult } from "../src/adapters/tmux.js";
 import type { CodexResumeAdapter } from "../src/adapters/codex-resume.js";
 import type { PiResumeAdapter } from "../src/adapters/pi-resume.js";
+import type { OmpResumeAdapter } from "../src/adapters/omp-resume.js";
 import type { ResumeResult } from "../src/adapters/claude-resume.js";
 import type { PersistedEvent, Snapshot } from "../src/domain/types.js";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { AppliedLaunchObservationStore } from "../src/domain/applied-launch-observation-store.js";
-import { observeClaudePermission, observeCodexSandbox, observePiResourceTrust, type AppliedLaunchObservation } from "../src/domain/permission-drift.js";
+import { observeClaudePermission, observeCodexSandbox, observePiResourceTrust, observeOmpApprovalMode, type AppliedLaunchObservation } from "../src/domain/permission-drift.js";
 import { buildCodexResumeCore } from "../src/domain/native-resume-probe.js";
 import { SeatIdentityReconciler } from "../src/domain/seat-identity-reconciler.js";
 
@@ -114,6 +115,7 @@ describe("RestoreOrchestrator", () => {
     claude?: ClaudeResumeAdapter;
     codex?: CodexResumeAdapter;
     pi?: PiResumeAdapter;
+    omp?: OmpResumeAdapter;
     listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>;
   }) {
     const tmux = opts?.tmux ?? mockTmux();
@@ -124,6 +126,7 @@ describe("RestoreOrchestrator", () => {
       claudeResume: opts?.claude ?? mockClaudeResume(),
       codexResume: opts?.codex ?? mockCodexResume(),
       piResume: opts?.pi,
+      ompResume: opts?.omp,
       listProcesses: opts?.listProcesses,
     });
   }
@@ -340,15 +343,16 @@ describe("RestoreOrchestrator", () => {
     otherDb.close();
   });
 
-  it("never resurrects an invalidated generation from delayed legacy Claude, Codex, or Pi resume", async () => {
+  it("never resurrects an invalidated generation from delayed legacy Claude, Codex, Pi, or OMP resume", async () => {
     const cases: Array<{
-      runtime: "claude-code" | "codex" | "pi";
-      resumeType: "claude_id" | "codex_id" | "pi_session_file";
+      runtime: "claude-code" | "codex" | "pi" | "omp";
+      resumeType: "claude_id" | "codex_id" | "pi_session_file" | "omp_session_file";
       appliedLaunch: AppliedLaunchObservation;
     }> = [
       { runtime: "claude-code", resumeType: "claude_id", appliedLaunch: observeClaudePermission("--permission-mode acceptEdits") },
       { runtime: "codex", resumeType: "codex_id", appliedLaunch: observeCodexSandbox("-s workspace-write") },
       { runtime: "pi", resumeType: "pi_session_file", appliedLaunch: observePiResourceTrust("no-approve") },
+      { runtime: "omp", resumeType: "omp_session_file", appliedLaunch: observeOmpApprovalMode("--approval-mode always-ask") },
     ];
 
     for (const [index, testCase] of cases.entries()) {
@@ -372,6 +376,9 @@ describe("RestoreOrchestrator", () => {
           : {}),
         ...(testCase.runtime === "pi"
           ? { pi: { canResume: vi.fn(() => true), resume } as unknown as PiResumeAdapter }
+          : {}),
+        ...(testCase.runtime === "omp"
+          ? { omp: { canResume: vi.fn(() => true), resume } as unknown as OmpResumeAdapter }
           : {}),
       });
 
@@ -1191,6 +1198,45 @@ describe("RestoreOrchestrator", () => {
     // NS-T04: resume failure is now FAILED loudly, no silent fallback to checkpoint
     if (result.ok) expect(result.result.nodes[0]!.status).toBe("awaiting-decision");
     fs.rmSync(tmpDir, { recursive: true });
+  });
+
+  it.each(["opaque", "command-error", "capture-error", "null"])("legacy %s observation preserves current binding and retained history", async mode => {
+    const snap = seedRigAndSnapshot({
+      nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }],
+      edges: [], resumeType: "claude_id", resumeToken: "retained-history", withBinding: "worker",
+    });
+    const nodeId = snap.data.nodes[0]!.id;
+    const readState = () => ({
+      binding: sessionRegistry.getBindingForNode(nodeId),
+      sessions: db.prepare("SELECT id, status, resume_type, resume_token FROM sessions WHERE node_id=? ORDER BY id").all(nodeId),
+    });
+    const tmux = mockTmux();
+    vi.mocked(tmux.getPaneCommand).mockImplementation(async () => {
+      if (mode === "command-error") throw new Error("command observation unavailable");
+      return mode === "null" ? null : "2.1.283";
+    });
+    vi.mocked(tmux.capturePaneContent).mockImplementation(async () => {
+      if (mode === "capture-error") throw new Error("capture observation unavailable");
+      return mode === "null" ? null : "Restored conversation\n❯\n  ⏵⏵ bypass permissions on (shift+tab to cycle)";
+    });
+    const claude = new ClaudeResumeAdapter(tmux, { pollMs: 0, maxWaitMs: 0 });
+    const resume = claude.resume.bind(claude);
+    let afterLaunch: ReturnType<typeof readState> | undefined;
+    vi.spyOn(claude, "resume").mockImplementation(async (...args) => {
+      afterLaunch = readState();
+      return resume(...args);
+    });
+    const result = await createOrchestrator({ tmux, claude }).restore(snap.id);
+    expect(result).toMatchObject({ ok: true, result: { rigResult: "partially_restored", nodes: [{ status: "attention_required" }] } });
+    expect(afterLaunch?.binding).not.toBeNull();
+    expect(afterLaunch).toBeDefined();
+    expect(readState()).toEqual(afterLaunch);
+    expect(readState().sessions).toContainEqual(expect.objectContaining({ resume_type: "claude_id", resume_token: "retained-history" }));
+    expect(readState().sessions).toContainEqual(expect.objectContaining({ status: "running", resume_token: null }));
+    expect(tmux.killSession).not.toHaveBeenCalled();
+    // Only the resume command and its submit; never orientation/checkpoint input.
+    expect(tmux.sendText).toHaveBeenCalledTimes(1);
+    expect(tmux.sendKeys).toHaveBeenCalledTimes(1);
   });
 
   it("legacy Claude resume verification failure -> status 'failed'", async () => {

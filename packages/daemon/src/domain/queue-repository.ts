@@ -640,10 +640,18 @@ function isWakeTimeoutSignal(s: string | undefined): boolean {
   return !!s && /timeout|timed\s*out|etimedout/i.test(s);
 }
 
+export interface QueueDestinationAdvisory {
+  code: "unmatched_destination_seat";
+  destinationSession: string;
+  availableDestinations: string[];
+  message: string;
+}
+
 export class QueueRepository {
   readonly db: Database.Database;
   readonly transitionLog: QueueTransitionLog;
   private readonly eventBus: EventBus;
+  readonly destinationAdvisory: (sessionRef: string) => QueueDestinationAdvisory | null;
   private readonly validateRig: (sessionRef: string) => boolean;
   private transport: QueueNudgeTransport | undefined;
   /** W1 (transactional closure): the durable wake-intent store. A terminal act
@@ -693,6 +701,7 @@ export class QueueRepository {
     eventBus: EventBus,
     opts?: {
       validateRig?: (sessionRef: string) => boolean;
+      destinationAdvisory?: (sessionRef: string) => QueueDestinationAdvisory | null;
       /**
        * R1 fix (PL-004 Phase A revision): durable+waking-by-default transport
        * for create / handoff / handoff-and-complete. When provided, the
@@ -727,6 +736,7 @@ export class QueueRepository {
     this.transitionLog = new QueueTransitionLog(db);
     this.wakeRepo = new QueueWakeRepository(db);
     this.validateRig = opts?.validateRig ?? (() => true);
+    this.destinationAdvisory = opts?.destinationAdvisory ?? (() => null);
     this.transport = opts?.transport;
     this.workflowFrontierPredicate = opts?.workflowFrontierPredicate;
     this.resolveOccupantGeneration = opts?.resolveOccupantGeneration;
@@ -2966,8 +2976,10 @@ export class QueueRepository {
    *  audited. The queue transition records that attempt independently of
    *  whether the HELD row's owner consumed it. */
   recordWatchdogWakeAttempt(jobId: string, deliveryStatus: string): void {
-    const targets = this.wakeRepo.findBlockedQitemsByWatchdog(jobId);
-    if (targets.length === 0) return;
+    const bindings = this.wakeRepo.findBlockedQitemsByWatchdog(jobId);
+    if (bindings.length === 0) return;
+    // Receipt ownership follows the latest park; timer lifecycle follows all bindings.
+    const targets = this.wakeRepo.findBlockedQitemsByWatchdog(jobId, true);
     const recordFired = ({ qitemId, kind }: (typeof targets)[number]): PersistedEvent => {
       const transition = this.transitionLog.append({
         qitemId,
@@ -2996,7 +3008,7 @@ export class QueueRepository {
         summary: this.getById(qitemId)?.summary ?? null,
       });
     };
-    const usageLimitBlockers = targets.filter(({ qitemId }) =>
+    const usageLimitBlockers = bindings.filter(({ qitemId }) =>
       this.getById(qitemId)?.tags?.includes(USAGE_LIMIT_BLOCKER_TAG),
     );
     // OPR.0.5.8.1 S1b — a park-generated timer is ONE-SHOT. `periodic-reminder`
@@ -3007,7 +3019,7 @@ export class QueueRepository {
     // behaviour is UNCHANGED by this repair and pinned as unchanged. This widens
     // the same act to ordinary park timers, without their blocker resolution —
     // resolving the blocker is a provider-limit outcome, not a timer one.
-    const parkGeneratedTimer = targets.some(({ kind }) => kind === "timer");
+    const parkGeneratedTimer = bindings.some(({ kind }) => kind === "timer");
     const events = this.db.transaction(() => {
       const firedEvents = targets.map(recordFired);
       if (deliveryStatus === "retained") return firedEvents;

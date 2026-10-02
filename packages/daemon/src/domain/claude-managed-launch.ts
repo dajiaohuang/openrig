@@ -72,7 +72,7 @@ export class ClaudeManagedLaunch {
   }
 
   async prepare(request: ClaudeLaunchTarget, mode: string): Promise<{
-    assertCurrent: () => void; command: (args: readonly string[]) => string; configDir: string;
+    assertCurrent: () => void; command: (args: readonly string[]) => string; configDir: string; executable: string;
   }> {
     const target = Object.freeze({ ...request });
     const before = this.target(target.nodeId);
@@ -116,7 +116,7 @@ export class ClaudeManagedLaunch {
     const terminal = ["TERM", "COLORTERM", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES",
       "LC_COLLATE", "LC_NUMERIC", "LC_TIME", "LC_MONETARY"]
       .map(key => `\${${key}:+"${key}=$${key}"}`);
-    return Object.freeze({ assertCurrent, configDir: context.configDir, command: (args: readonly string[]) => {
+    return Object.freeze({ assertCurrent, configDir: context.configDir, executable: context.executable, command: (args: readonly string[]) => {
       assertCurrent();
       return `cd ${shellQuote(cwd)} && /usr/bin/env -i ${[...assignments, ...forwarded, ...terminal, shellQuote(context.executable), ...args.map(shellQuote)].join(" ")}`;
     } });
