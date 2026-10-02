@@ -405,7 +405,7 @@ describe("ClaudeResumeAdapter", () => {
     });
 
     it.each([
-      ["2.1.283", "resume_failed"],
+      ["2.1.283", "attention_required"],
       ["sh", "retry_fresh"],
     ] as const)("does not accept the prompt behind %s when the native process carries another resume token", async (paneCommand, expectedCode) => {
       const tmux = mockTmux({
