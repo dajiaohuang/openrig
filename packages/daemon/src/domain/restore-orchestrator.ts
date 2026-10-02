@@ -17,6 +17,7 @@ import type { CodexResumeAdapter } from "../adapters/codex-resume.js";
 import type { PiResumeAdapter } from "../adapters/pi-resume.js";
 import type { TranscriptStore } from "./transcript-store.js";
 import { assessNativeResumeProbe } from "./native-resume-probe.js";
+import { verifyClaudePaneProcess } from "./native-process-lineage.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 import type {
   RestoreOutcome,
@@ -1827,13 +1828,20 @@ export class RestoreOrchestrator {
     }
     const paneCommand = await this.tmuxAdapter.getPaneCommand(identity.pane);
     const paneContent = (await this.tmuxAdapter.capturePaneContent(identity.pane, 40)) ?? "";
+    const claudeResumeIdentityVerified = runtime === "claude-code" && !!await verifyClaudePaneProcess({
+      target: identity.pane,
+      tmux: this.tmuxAdapter,
+      expectedToken: expectedResumeToken,
+      requireResume: true,
+      ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}),
+    });
     const probe = assessNativeResumeProbe({
       runtime,
       paneCommand,
       paneContent,
-      // rebindAndVerifyPaneIdentity above already proved the exact persisted
-      // resume token inside this pane's live native-process lineage.
-      ...(runtime === "claude-code" ? { claudeResumeIdentityVerified: true } : {}),
+      // Headerless readiness requires the same stable foreground/argv proof
+      // as the resume adapter; a token-bearing descendant alone is insufficient.
+      ...(claudeResumeIdentityVerified ? { claudeResumeIdentityVerified: true } : {}),
     });
     const fgProcess = runtime === "claude-code" ? "claude" as const : runtime === "codex" ? "codex" as const : null;
     if (!fgProcess) {
