@@ -85,6 +85,13 @@ function getStartupContext(db: Database.Database, nodeId: string): StartupContex
         evidence: `Persisted startup context field projection_entries_json is not an array for node ${nodeId}`,
       };
     }
+    if (projectionEntries.value.some((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return true;
+      const candidate = entry as Record<string, unknown>;
+      return typeof candidate["absolutePath"] !== "string" || candidate["absolutePath"].trim() === "";
+    })) {
+      return { status: "malformed", evidence: `Persisted startup context field projection_entries_json contains an invalid selection member for node ${nodeId}` };
+    }
 
     const startupActions = parseStartupContextJsonField<unknown[]>(row.startup_actions_json, "startup_actions_json", nodeId);
     if (!startupActions.ok) {

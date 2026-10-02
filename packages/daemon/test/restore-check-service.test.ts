@@ -850,12 +850,12 @@ describe("RestoreCheckService", () => {
     expect(hookChecks).toHaveLength(0);
   });
 
-  it("checks the shipped Claude activity-hook projection selected by startup context", () => {
+  it.each([undefined, "*", "startup|resume", "startup, resume", "^(startup|resume)$"])("checks usable selected activity-hook matcher %s", (matcher) => {
     const cwd = path.join(os.tmpdir(), "restore-check-activity-seat");
     const settingsPath = path.join(cwd, ".claude", "settings.local.json");
     const relayPath = path.join(cwd, ".openrig", "hooks", "scripts", "activity-relay.cjs");
     const events = ["SessionStart", "UserPromptSubmit"];
-    const settings = JSON.stringify({ hooks: Object.fromEntries(events.map((event) => [event, [{ hooks: [
+    const settings = JSON.stringify({ hooks: Object.fromEntries(events.map((event) => [event, [{ matcher, hooks: [
       { type: "command", command: `node '${relayPath}'` },
     ] }]])) });
     const service = new RestoreCheckService(mockDeps({
@@ -873,6 +873,33 @@ describe("RestoreCheckService", () => {
     expect(hook?.status).toBe("green");
     expect(hook?.evidence).toContain("activity hooks are projected");
     expect(hook?.evidence).toContain(relayPath);
+  });
+
+  it.each(["disabled", "compact-only", "prompt-handler", "invalid-matcher", "substring-matcher"])("keeps %s selected activity hooks as a caveat", (kind) => {
+    const cwd = path.join(os.tmpdir(), "restore-check-activity-seat-unusable");
+    const settingsPath = path.join(cwd, ".claude", "settings.local.json");
+    const relayPath = path.join(cwd, ".openrig", "hooks", "scripts", "activity-relay.cjs");
+    const service = new RestoreCheckService(mockDeps({
+      getNodeInventory: () => [claudeNode({ cwd })],
+      getStartupContext: () => startupContextProbe({ projectionEntries: [{
+        absolutePath: "/source/openrig-core", category: "runtime_resource", resourceType: "claude_activity_hooks",
+      }] }),
+      getClaudeActivityHookEvents: () => ["SessionStart"],
+      exists: (candidate) => candidate === settingsPath || candidate === relayPath || candidate.endsWith("host-infra.json"),
+      readFile: (candidate) => candidate === settingsPath ? JSON.stringify({
+        disableAllHooks: kind === "disabled",
+        hooks: { SessionStart: [{
+          ...(kind === "compact-only" ? { matcher: "compact" } : {}),
+          ...(kind === "invalid-matcher" ? { matcher: "[" } : {}),
+          ...(kind === "substring-matcher" ? { matcher: "start|sum" } : {}),
+          hooks: [{ type: kind === "prompt-handler" ? "prompt" : "command", command: `node '${relayPath}'` }],
+        }] },
+      }) : VALID_HOST_INFRA_DECLARATION,
+    }));
+    const hook = service.check({}).checks.find((entry) => entry.check === "seat.dev-impl@test-rig.hooks");
+    expect(hook?.status).toBe("yellow");
+    expect(hook?.remediationSafe).toBe(false);
+    expect(hook?.evidence).toContain(kind === "disabled" ? "disabled" : "SessionStart");
   });
 
   it("does not accept a similarly named command as the projected Claude activity hook", () => {

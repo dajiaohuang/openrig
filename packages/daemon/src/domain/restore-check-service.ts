@@ -1001,6 +1001,14 @@ export class RestoreCheckService {
           remediationSafe: false,
         };
       }
+      if (isRecord(settings) && settings["disableAllHooks"] === true) {
+        return {
+          check: `seat.${session}.hooks`, status: "yellow",
+          evidence: `Selected Claude activity hooks are explicitly disabled in ${settingsPath}; projection does not prove usable hooks`,
+          remediation: "Review the intentional hook-disable setting before relying on activity-hook readiness",
+          remediationSafe: false,
+        };
+      }
       const missingEvents = events.filter((event) => !this.hasActivityRelayHook(settings, event, relayPath));
       if (missingEvents.length === 0) {
         return {
@@ -1031,13 +1039,26 @@ export class RestoreCheckService {
     if (!isRecord(settings) || !isRecord(settings["hooks"])) return false;
     const eventEntries = settings["hooks"][eventName];
     if (!Array.isArray(eventEntries)) return false;
-    return eventEntries.some((entry) => {
+    const contexts = eventName === "SessionStart" ? ["startup", "resume"]
+      : eventName === "Notification" ? ["permission_prompt", "idle_prompt"] : [null];
+    return contexts.every((context) => eventEntries.some((entry) => {
       if (!isRecord(entry) || !Array.isArray(entry["hooks"])) return false;
+      if (context !== null && entry["matcher"] !== undefined && entry["matcher"] !== "" && entry["matcher"] !== "*") {
+        if (typeof entry["matcher"] !== "string") return false;
+        try {
+          const matcher = entry["matcher"];
+          const matches = /^[a-zA-Z0-9_\- ,|]+$/.test(matcher)
+            ? matcher.split(/[|,]/).some((value) => value.trim() === context)
+            : new RegExp(matcher).test(context);
+          if (!matches) return false;
+        }
+        catch { return false; }
+      }
       return entry["hooks"].some((hook) => (
-        isRecord(hook) && typeof hook["command"] === "string" &&
+        isRecord(hook) && hook["type"] === "command" && typeof hook["command"] === "string" &&
         hook["command"] === `node ${quoteShellArgument(relayPath)}`
       ));
-    });
+    }));
   }
 
   private checkSpecPresent(rig: { rigId: string; name: string }): CheckEntry {

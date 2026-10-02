@@ -356,6 +356,25 @@ describe("Restore check routes", () => {
     expect(body.checks.some((c: { check: string }) => c.check === "probe.error")).toBe(false);
   });
 
+  it.each([
+    [null],
+    [{ category: "runtime_resource", resourceType: "claude_activity_hooks" }],
+  ])("GET /api/restore-check preserves malformed selection members as hook caveats: %j", async (member) => {
+    const rig = rigRepo.createRig("malformed-selection-rig");
+    const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
+    const session = sessionRegistry.registerSession(node.id, "dev-impl@malformed-selection-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateStartupStatus(session.id, "ready");
+    insertStartupContextRow(db, node.id, { projectionEntriesJson: JSON.stringify([member]) });
+    const res = await app.request("/api/restore-check?rig=malformed-selection-rig&noQueue=true");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    const hook = body.checks.find((c: { check: string }) => c.check === "seat.dev-impl@malformed-selection-rig.hooks");
+    expect(hook.status).toBe("yellow");
+    expect(hook.evidence).not.toContain("not selected");
+    expect(body.checks.find((c: { check: string }) => c.check.endsWith(".startup-context")).evidence).toContain("projection_entries_json");
+  });
+
   it("GET /api/restore-check does not false-green malformed startup_actions_json", async () => {
     const rig = rigRepo.createRig("malformed-startup-actions-rig");
     const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code" });
