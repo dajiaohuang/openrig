@@ -64,6 +64,11 @@ function workspaceOf(dir: string, io: ScopeFsDeps, required = true): string {
     }
   }
 }
+/** The owning authored project, shared by readiness and lifecycle compilation.
+ * Mission storage need not be the default one-level `missions` directory. */
+export function resolveProjectRoot(dir: string): string {
+  return workspaceOf(dir, proofFs);
+}
 function policyOf(dir: string, io: ScopeFsDeps, readManifest = manifest): ScopeReadiness["policy"] {
   const root = workspaceOf(dir, io, false);
   for (let p = path.resolve(dir); ; p = path.dirname(p)) {
@@ -261,8 +266,8 @@ export function recordJudgment(missionsRoot: string, input: JudgeInput, actor: s
   // Same-directory temp+fsync follows FileWriteService; link publishes without replacing a receipt.
   // Synchronous in the supported daemon writer. A competing process loses the exclusive publication.
   const fd = fs.openSync(temporary, "wx", 0o600);
-  try { fs.writeFileSync(fd, `---\n${YAML.stringify(judgment)}---\n\n${input.reason}\n`); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
   try {
+    try { fs.writeFileSync(fd, `---\n${YAML.stringify(judgment)}---\n\n${input.reason}\n`); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
     fs.linkSync(temporary, target);
     const directory = fs.openSync(home, "r");
     try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
@@ -316,7 +321,7 @@ export function readMissionReadiness(missionDir: string, readPolicy: ProofPolicy
     for (const s of slices) s.eligible = visit(s);
   } catch (e) { issues.push(e instanceof Error ? e.message : String(e)); for (const s of slices) s.eligible = null; }
   const state = issues.length || slices.some(s => ["unknown", "legacy"].includes(s.readiness.state)) ? "unknown" : slices.length && slices.every(s => s.readiness.state === "ready") ? "ready" : "not-ready";
-  return { revision: hash([slices, issues]), state, slices, issues, historicalStatus };
+  return { revision: hash([slices, issues, historicalStatus]), state, slices, issues, historicalStatus };
 }
 
 export function readProjectReadiness(missionsRoot: string, readPolicy: ProofPolicyRead = policyOf) {
