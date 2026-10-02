@@ -26,7 +26,10 @@ interface StreamResponse {
   once(event: "close" | "finish", listener: () => void): unknown;
 }
 
-const activeResponses = new WeakMap<object, Set<{ response: StreamResponse; contentType?: string }>>();
+const activeResponses = new WeakMap<object, {
+  responses: Set<{ response: StreamResponse; contentType?: string }>;
+  endLateStream?: (response: StreamResponse) => void;
+}>();
 
 /** Register before requests arrive so shutdown can end SSE without cutting ordinary requests. */
 export function trackHttpServerResponses(server: {
@@ -34,7 +37,8 @@ export function trackHttpServerResponses(server: {
 }): void {
   if (activeResponses.has(server)) return;
   const responses = new Set<{ response: StreamResponse; contentType?: string }>();
-  activeResponses.set(server, responses);
+  const state: NonNullable<ReturnType<typeof activeResponses.get>> = { responses };
+  activeResponses.set(server, state);
   server.prependListener("request", (_request, response) => {
     const tracked: { response: StreamResponse; contentType?: string } = { response };
     responses.add(tracked);
@@ -47,7 +51,12 @@ export function trackHttpServerResponses(server: {
         : headers && typeof headers === "object" ? Object.entries(headers) : [];
       const directType = entries.find(([name]) => name.toLowerCase() === "content-type")?.[1];
       tracked.contentType = String(directType ?? response.getHeader("content-type") ?? "");
-      return Reflect.apply(writeHead, this, [statusCode, ...args]);
+      const result = Reflect.apply(writeHead, this, [statusCode, ...args]);
+      if (state.endLateStream && tracked.contentType.split(";")[0]!.trim().toLowerCase() === "text/event-stream") {
+        // Let the handler finish its current synchronous writes before ending it.
+        setImmediate(() => state.endLateStream?.(response));
+      }
+      return result;
     };
     response.once("close", () => responses.delete(tracked));
   });
@@ -60,7 +69,11 @@ export function closeHttpServer(server: ServerShutdownHandle, graceMs = DAEMON_H
     let settled = false;
     const forceCloseTimer = setTimeout(() => {
       try {
-        for (const { response, contentType: observedType } of activeResponses.get(server) ?? []) {
+        const state = activeResponses.get(server);
+        if (state) state.endLateStream = (response) => {
+          try { response.end(); } catch (error) { finish(error as Error); }
+        };
+        for (const { response, contentType: observedType } of state?.responses ?? []) {
           const contentType = String(observedType ?? response.getHeader("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
           if (contentType === "text/event-stream") response.end();
         }
@@ -75,7 +88,7 @@ export function closeHttpServer(server: ServerShutdownHandle, graceMs = DAEMON_H
       else resolve();
     };
     try {
-      for (const { response } of activeResponses.get(server) ?? []) {
+      for (const { response } of activeResponses.get(server)?.responses ?? []) {
         response.once("finish", () => setImmediate(() => server.closeIdleConnections?.()));
       }
       server.close(finish);

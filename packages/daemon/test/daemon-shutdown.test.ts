@@ -50,6 +50,40 @@ it.each(["object", "array", "reason", "cached"])("closes active event streams wi
   expect(server.listening).toBe(false);
 });
 
+it("ends an SSE response whose headers arrive after the shutdown grace period", async () => {
+  let releaseHeaders!: () => void;
+  let accepted!: () => void;
+  const acceptedRequest = new Promise<void>((resolve) => { accepted = resolve; });
+  const server = createServer((_request, response) => {
+    releaseHeaders = () => {
+      response.writeHead(200, { "Content-Type": "text/event-stream" });
+      response.write("data: delayed\n\n");
+    };
+    accepted();
+  });
+  trackHttpServerResponses(server);
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Expected an ephemeral TCP address");
+  const request = httpGet(`http://127.0.0.1:${address.port}/events`);
+  request.on("error", () => {});
+  const responseDone = new Promise<import("node:http").IncomingMessage>((resolve) => request.once("response", (response) => {
+    response.on("error", () => {}); response.resume(); response.once("end", () => resolve(response));
+  }));
+  await acceptedRequest;
+  const f = fixture([["connections", () => closeHttpServer(server, 20)]], 500);
+  try {
+    f.shutdown("SIGTERM");
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    expect(f.markClean).not.toHaveBeenCalled();
+    releaseHeaders();
+    await vi.waitFor(() => expect(f.exit).toHaveBeenCalledWith(0));
+    expect((await responseDone).complete).toBe(true);
+    expect(f.receipt().outcome).toBe("clean");
+  } finally { request.destroy(); server.closeAllConnections(); server.close(); }
+});
+
 it.each([false, true])("does not report clean shutdown before an ordinary request completes (budget expires: %s)", async (budgetExpires) => {
   let ordinaryResponse: import("node:http").ServerResponse | undefined;
   const server = createServer((request, response) => {
