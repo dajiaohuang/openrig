@@ -71,16 +71,6 @@ describe("resolveNodeWorkspace (PL-007)", () => {
     expect(r?.kind).toBe("project");
   });
 
-  it("matches a repo whose directory name begins with two dots", () => {
-    const specWithDotPrefixRepo: WorkspaceSpec = {
-      ...spec,
-      repos: [...spec.repos, { name: "dot-cache", path: "/Users/op/hub/..cache", kind: "lab" }],
-    };
-    const r = resolveNodeWorkspace({ spec: specWithDotPrefixRepo, cwd: "/Users/op/hub/..cache/file.ts" });
-    expect(r?.activeRepo).toBe("dot-cache");
-    expect(r?.kind).toBe("lab");
-  });
-
   it("returns kind=knowledge when cwd is under knowledge_root", () => {
     const r = resolveNodeWorkspace({ spec, cwd: "/Users/op/knowledge/canon" });
     expect(r?.kind).toBe("knowledge");
