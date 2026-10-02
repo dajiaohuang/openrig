@@ -148,14 +148,14 @@ describe("PodBundleAssembler", () => {
     expect(result.manifest.agents).toHaveLength(1);
   });
 
-  it("preserves executable modes while vendoring agent package files", () => {
+  it.each([0o700, 0o750, 0o755, 0o600])("preserves mode %i while vendoring agent package files", (mode) => {
     const rigRoot = nodePath.resolve(RIG_ROOT);
     const scriptPath = nodePath.join(rigRoot, "agents", "impl", "bin", "hello.sh");
     const fs = mockFs({
       [nodePath.join(rigRoot, "rig.yaml")]: rigSpecYaml(makeRigSpec()),
       [nodePath.join(rigRoot, "agents", "impl", "agent.yaml")]: validAgentYaml("impl"),
       [scriptPath]: "#!/bin/sh\necho hello\n",
-    }, { [scriptPath]: 0o755 });
+    }, { [scriptPath]: mode });
     const assembler = new PodBundleAssembler({ fsOps: fs });
 
     assembler.assemble({
@@ -168,7 +168,7 @@ describe("PodBundleAssembler", () => {
 
     expect((fs as unknown as { _writtenModes: Record<string, number> })._writtenModes[
       nodePath.join("/tmp/bundle-staging-executable", "agents", "impl", "bin", "hello.sh")
-    ]).toBe(0o755);
+    ]).toBe(mode);
   });
 
   it("preserves builtin terminal members without trying to vendor them", () => {
