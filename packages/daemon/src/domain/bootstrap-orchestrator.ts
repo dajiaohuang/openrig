@@ -766,12 +766,18 @@ export class BootstrapOrchestrator {
 
     // Parse and normalize via the canonical pod-aware codec/schema path
     let normalizedSpec: import("./types.js").RigSpec;
+    let configuredProjectName: string | undefined;
     try {
       const { RigSpecCodec: PodCodec } = await import("./rigspec-codec.js");
       const { RigSpecSchema: PodSchema } = await import("./rigspec-schema.js");
       const raw = PodCodec.parse(rigSpecYaml);
       const validation = PodSchema.validate(raw);
       if (!validation.valid) return undefined;
+      const rawServices = (raw as Record<string, unknown>)["services"];
+      if (rawServices && typeof rawServices === "object") {
+        const rawProjectName = (rawServices as Record<string, unknown>)["project_name"];
+        if (typeof rawProjectName === "string") configuredProjectName = rawProjectName;
+      }
       normalizedSpec = PodSchema.normalize(raw as Record<string, unknown>);
     } catch {
       return undefined;
@@ -782,17 +788,18 @@ export class BootstrapOrchestrator {
     const serviceOrch = this.deps.serviceOrchestrator;
     const rigRepo = this.deps.rigRepo;
     const services = normalizedSpec.services;
-    const rigName = normalizedSpec.name;
 
     return async (rigId: string) => {
       // Persist services record for the now-created rig
       const { deriveComposeProjectName } = await import("./compose-project-name.js");
       const composeFile = nodePath.resolve(rigRoot, services.composeFile);
-      const projectName = services.projectName ?? deriveComposeProjectName(rigName);
+      // Rig IDs are stable and unique; sanitizing rig names can collapse distinct names.
+      const projectName = configuredProjectName ?? deriveComposeProjectName(rigId);
+      const persistedServices = { ...services, projectName };
 
       rigRepo.setServicesRecord(rigId, {
         kind: "compose",
-        specJson: JSON.stringify(services),
+        specJson: JSON.stringify(persistedServices),
         rigRoot,
         composeFile,
         projectName,

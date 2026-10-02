@@ -591,9 +591,10 @@ export class RigRepository {
   setServicesRecord(rigId: string, record: RigServicesRecordInput): RigServicesRecord {
     const now = new Date().toISOString();
     const composeFile = resolve(record.rigRoot, record.composeFile);
-    const rig = this.db.prepare("SELECT name FROM rigs WHERE id = ?").get(rigId) as { name: string } | undefined;
+    const rig = this.db.prepare("SELECT 1 AS present FROM rigs WHERE id = ?").get(rigId);
     if (!rig) throw new Error(`Rig not found: ${rigId}`);
-    const projectName = record.projectName ?? deriveComposeProjectName(rig.name);
+    // Keep the fallback aligned with bootstrap's unique, stable rig-ID default.
+    const projectName = record.projectName ?? deriveComposeProjectName(rigId);
     this.db.prepare(`
       INSERT INTO rig_services (
         rig_id,
