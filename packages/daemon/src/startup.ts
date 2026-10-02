@@ -529,14 +529,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const snapshotRepo = new SnapshotRepository(db);
   const checkpointStore = new CheckpointStore(db);
   const snapshotCapture = new SnapshotCapture({ db, rigRepo, sessionRegistry, eventBus, snapshotRepo, checkpointStore });
-  const claudeRendererEnv = {
+  const claudeManagedLaunch = new ClaudeManagedLaunch(db, { ...launchSessionEnv, CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR }, {
     OPENRIG_CLAUDE_DISABLE_ALTERNATE_SCREEN: process.env.OPENRIG_CLAUDE_DISABLE_ALTERNATE_SCREEN,
-    TERM: process.env.TERM,
-    COLORTERM: process.env.COLORTERM,
-    LANG: process.env.LANG,
-    ...Object.fromEntries(Object.entries(process.env).filter(([key]) => /^LC_[A-Z0-9_]+$/.test(key))),
-  };
-  const claudeManagedLaunch = new ClaudeManagedLaunch(db, { ...launchSessionEnv, CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR }, claudeRendererEnv);
+  });
   const claudeResume = new ClaudeResumeAdapter(tmuxAdapter, { claudeManagedLaunch });
   const codexResume = new CodexResumeAdapter(tmuxAdapter, { launchPath: process.env.PATH, detectDaemonSupport: codexDaemonSupportProbe(process.env.PATH) });
   // OPR.0.4.6.PI1 — the Pi seat-state root + the compiled runner entry (daemon

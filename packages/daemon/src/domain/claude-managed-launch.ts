@@ -54,13 +54,6 @@ export class ClaudeManagedLaunch {
     // Session storage needs a directory, but exporting the default changes
     // Claude's global config selection. Preserve an unset native selection.
     if (CLAUDE_CONFIG_DIR !== undefined) env.CLAUDE_CONFIG_DIR = configDir;
-    for (const key of ["TERM", "COLORTERM", "LANG"]) {
-      const value = this.rendererEnv[key];
-      if (value !== undefined) env[key] = value;
-    }
-    for (const [key, value] of Object.entries(this.rendererEnv)) {
-      if (/^LC_[A-Z0-9_]+$/.test(key) && value !== undefined) env[key] = value;
-    }
     if (claudeClassicRendererEnvPrefix(this.rendererEnv)) env.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN = "1";
     let executable: string | undefined;
     for (const dir of search) {
@@ -118,9 +111,14 @@ export class ClaudeManagedLaunch {
       ...(generation ? { OPENRIG_OCCUPANT_GENERATION: generation } : {}) };
     const assignments = Object.entries({ ...context.env, ...identity }).map(([key, value]) => shellQuote(`${key}=${value}`));
     const forwarded = inherited.filter(key => !(key in identity)).map(key => `"${key}=\${${key}-}"`);
+    // Expand in the target pane shell, whose terminal can differ from the daemon.
+    // Empty and absent values remain absent after env -i.
+    const terminal = ["TERM", "COLORTERM", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES",
+      "LC_COLLATE", "LC_NUMERIC", "LC_TIME", "LC_MONETARY"]
+      .map(key => `\${${key}:+"${key}=$${key}"}`);
     return Object.freeze({ assertCurrent, configDir: context.configDir, command: (args: readonly string[]) => {
       assertCurrent();
-      return `cd ${shellQuote(cwd)} && /usr/bin/env -i ${[...assignments, ...forwarded, shellQuote(context.executable), ...args.map(shellQuote)].join(" ")}`;
+      return `cd ${shellQuote(cwd)} && /usr/bin/env -i ${[...assignments, ...forwarded, ...terminal, shellQuote(context.executable), ...args.map(shellQuote)].join(" ")}`;
     } });
   }
 }

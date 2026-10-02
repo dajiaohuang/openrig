@@ -44,8 +44,8 @@ function fixture() {
   db.exec("INSERT INTO bindings VALUES ('binding','node','seat','%1'); INSERT INTO occupant_tenures VALUES ('node','generation-1',1)");
   const env: Record<string,string> = { PATH: "./bin" + path.delimiter + daemonBin, HOME: path.join(root, "home"), CLAUDE_CONFIG_DIR: "./config",
     ANTHROPIC_API_KEY: "synthetic-secret-never-in-command", OPENRIG_HOME: path.join(root, "instance") };
-  const renderer = { TERM: "tmux-256color", COLORTERM: "truecolor", LANG: "en_US.UTF-8",
-    LC_CTYPE: "en_US.UTF-8", LC_MESSAGES: "en_US.UTF-8", UNAPPROVED_RENDERER_VALUE: "must-not-forward" };
+  const renderer = { TERM: "dumb", COLORTERM: "daemon-value", LANG: "C",
+    LC_CTYPE: "C", LC_MESSAGES: "C", UNAPPROVED_RENDERER_VALUE: "must-not-forward" };
   const managed = new ClaudeManagedLaunch(db, env, renderer);
   const calls: string[] = [];
   const tmux = { sendShellCommand: vi.fn(async (_target: string, command: string, check: () => void) => { check(); calls.push(command); return { ok: true as const }; }),
@@ -70,9 +70,10 @@ const input = { seatRef: "owner@rig", mode: "auto", actor: "operator", reason: "
 
 describe("S03 production managed capability selection", () => {
   it.each([
-    ["unset", undefined], ["relative", "./config"],
-    ["absolute", "/inert/explicit-config"], ["empty", ""],
-  ])("preserves %s config selection in help and the executed launch", async (_label, selected) => {
+    ["unset", undefined, "present"], ["relative", "./config", "present"],
+    ["absolute", "/inert/explicit-config", "present"], ["empty", "", "present"],
+    ["absent terminal", undefined, "absent"], ["empty terminal", undefined, "empty"],
+  ])("preserves %s config selection in help and the executed launch", async (_label, selected, terminal) => {
     const f = fixture();
     if (selected === undefined) delete f.env.CLAUDE_CONFIG_DIR;
     else f.env.CLAUDE_CONFIG_DIR = selected;
@@ -97,9 +98,15 @@ if (process.argv.includes('--help')) {
     const args = ["--permission-mode", "auto", "--name", "seat's literal name"];
     const command = prepared.command(args);
     expect(command).not.toContain(f.env.ANTHROPIC_API_KEY);
+    const paneEnv: Record<string, string> = { ...f.env, UNAPPROVED_RENDERER_VALUE: "must-not-forward",
+      CLAUDE_CONFIG_DIR: "/inert/not-the-managed-selection", OPENRIG_NODE_ID: "not-the-target" };
+    if (terminal !== "absent") Object.assign(paneEnv, Object.fromEntries(Object.entries({
+      TERM: "tmux-256color", COLORTERM: "truecolor", LANG: "en_US.UTF-8",
+      LC_CTYPE: "en_US.UTF-8", LC_MESSAGES: "en_US.UTF-8",
+    }).map(([key, value]) => [key, terminal === "empty" ? "" : value])));
     const stdout = await new Promise<string>((resolve, reject) => {
       native.execFile("/bin/sh", ["-c", command], { encoding: "utf8", timeout: 3000,
-        env: { ...f.env, CLAUDE_CONFIG_DIR: "/inert/not-the-managed-selection", OPENRIG_NODE_ID: "not-the-target" } },
+        env: paneEnv },
       (error, out) => error ? reject(error) : resolve(out));
     });
     const launched = JSON.parse(stdout);
@@ -110,11 +117,11 @@ if (process.argv.includes('--help')) {
     }
     if (selected === undefined) expect.soft(command).not.toContain("CLAUDE_CONFIG_DIR=");
     expect(queried).not.toHaveProperty("ANTHROPIC_API_KEY");
-    for (const env of [queried, launched.env]) {
-      expect(env).toMatchObject({ TERM: "tmux-256color", COLORTERM: "truecolor", LANG: "en_US.UTF-8",
-        LC_CTYPE: "en_US.UTF-8", LC_MESSAGES: "en_US.UTF-8" });
-      expect(env).not.toHaveProperty("UNAPPROVED_RENDERER_VALUE");
-    }
+    if (terminal === "present") expect(launched.env).toMatchObject({ TERM: "tmux-256color", COLORTERM: "truecolor", LANG: "en_US.UTF-8",
+      LC_CTYPE: "en_US.UTF-8", LC_MESSAGES: "en_US.UTF-8" });
+    else for (const key of ["TERM", "COLORTERM", "LANG", "LC_CTYPE", "LC_MESSAGES"]) expect(launched.env).not.toHaveProperty(key);
+    expect(queried).not.toHaveProperty("TERM");
+    expect(launched.env).not.toHaveProperty("UNAPPROVED_RENDERER_VALUE");
     expect(launched).toMatchObject({ cwd: f.cwd, args, env: {
       HOME: f.env.HOME, ANTHROPIC_API_KEY: f.env.ANTHROPIC_API_KEY, OPENRIG_HOME: f.env.OPENRIG_HOME,
       OPENRIG_NODE_ID: "node", OPENRIG_RUNTIME: "claude-code", OPENRIG_SESSION_NAME: "seat",
@@ -125,11 +132,10 @@ if (process.argv.includes('--help')) {
     const f = fixture();
     const prepared = await f.managed.prepare({ nodeId: "node", session: "seat", pane: "%1" }, "auto");
     const command = prepared.command([]);
-    expect(command).toContain("TERM=tmux-256color");
-    expect(command).toContain("COLORTERM=truecolor");
-    expect(command).toContain("LANG=en_US.UTF-8");
-    expect(command).toContain("LC_CTYPE=en_US.UTF-8");
-    expect(command).toContain("LC_MESSAGES=en_US.UTF-8");
+    for (const key of ["TERM", "COLORTERM", "LANG", "LC_ALL", "LC_CTYPE", "LC_MESSAGES",
+      "LC_COLLATE", "LC_NUMERIC", "LC_TIME", "LC_MONETARY"]) {
+      expect(command).toContain(`\${${key}:+"${key}=$${key}"}`);
+    }
     expect(command).not.toContain("UNAPPROVED_RENDERER_VALUE");
   });
   it("detects unset config becoming explicit even when the storage directory stays the same", async () => {
