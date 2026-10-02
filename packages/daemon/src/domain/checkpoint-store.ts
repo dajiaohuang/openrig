@@ -50,7 +50,7 @@ export class CheckpointStore {
   getLatestCheckpoint(nodeId: string): Checkpoint | null {
     const row = this.db
       .prepare(
-        "SELECT * FROM checkpoints WHERE node_id = ? ORDER BY created_at DESC LIMIT 1"
+        "SELECT * FROM checkpoints WHERE node_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1"
       )
       .get(nodeId) as CheckpointRow | undefined;
     return row ? this.rowToCheckpoint(row) : null;
