@@ -7,22 +7,26 @@ import { pathToFileURL } from "node:url";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
-import { closeHttpServer, createDaemonShutdown, DAEMON_SHUTDOWN_TIMEOUT_MS } from "../src/daemon-shutdown.js";
+import { closeHttpServer, createDaemonShutdown, DAEMON_SHUTDOWN_TIMEOUT_MS, trackHttpServerResponses } from "../src/daemon-shutdown.js";
 
 const dirs: string[] = [];
 afterEach(() => { vi.useRealTimers(); for (const p of dirs.splice(0)) fs.rmSync(p, { recursive: true, force: true }); });
-function fixture(phases: Array<[string, () => unknown]>) {
+function fixture(phases: Array<[string, () => unknown]>, timeoutMs?: number) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "shutdown-unit-")); dirs.push(dir);
   const receiptPath = path.join(dir, "result.json");
   const markClean = vi.fn(); const exit = vi.fn(); const log = vi.fn();
-  const shutdown = createDaemonShutdown({ phases, markClean, exit, log, receiptPath });
+  const shutdown = createDaemonShutdown({ phases, markClean, exit, log, receiptPath, timeoutMs });
   return { shutdown, exit, markClean, log, receipt: () => JSON.parse(fs.readFileSync(receiptPath, "utf8")) };
 }
-it("closes active event streams after a short grace period", async () => {
+it.each(["object", "array", "reason", "cached"])("closes active event streams with %s headers after a short grace period", async (headers) => {
   const server = createServer((_request, response) => {
-    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    if (headers === "array") response.writeHead(200, ["Content-Type", "text/event-stream"]);
+    else if (headers === "reason") response.writeHead(200, "OK", { "Content-Type": "text/event-stream" });
+    else if (headers === "cached") { response.setHeader("Content-Type", "text/event-stream"); response.writeHead(200); }
+    else response.writeHead(200, { "Content-Type": "text/event-stream" });
     response.write("data: connected\n\n");
   });
+  trackHttpServerResponses(server);
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
   const address = server.address();
@@ -34,6 +38,7 @@ it("closes active event streams after a short grace period", async () => {
     request.once("error", reject);
     request.once("response", (response) => {
       response.on("error", () => {});
+      response.resume();
       responseClosed = new Promise<void>((resolve) => response.once("close", resolve));
       resolve(response);
     });
@@ -41,8 +46,55 @@ it("closes active event streams after a short grace period", async () => {
 
   await closeHttpServer(server, 20);
   await responseClosed;
-  expect(response.complete).toBe(false);
+  expect(response.complete).toBe(true);
   expect(server.listening).toBe(false);
+});
+
+it.each([false, true])("does not report clean shutdown before an ordinary request completes (budget expires: %s)", async (budgetExpires) => {
+  let ordinaryResponse: import("node:http").ServerResponse | undefined;
+  const server = createServer((request, response) => {
+    response.writeHead(200, { "Content-Type": request.url === "/events" ? "text/event-stream; charset=utf-8" : "text/plain" });
+    response.write(request.url === "/events" ? "data: connected\n\n" : "pending");
+    if (request.url !== "/events") ordinaryResponse = response;
+  });
+  trackHttpServerResponses(server);
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Expected an ephemeral TCP address");
+  const openResponse = (route: string) => new Promise<import("node:http").IncomingMessage>((resolve, reject) => {
+    const request = httpGet(`http://127.0.0.1:${address.port}${route}`);
+    request.once("error", reject);
+    request.once("response", response => { response.on("error", () => {}); response.resume(); resolve(response); });
+  });
+  const eventStream = await openResponse("/events");
+  const ordinary = await openResponse("/write");
+  const eventsClosed = new Promise<void>(resolve => eventStream.once("close", resolve));
+  const ordinaryClosed = new Promise<void>(resolve => ordinary.once("close", resolve));
+  const f = fixture([["connections", () => closeHttpServer(server, 20)]], budgetExpires ? 100 : undefined);
+  try {
+    f.shutdown("SIGTERM");
+    await eventsClosed;
+    expect(f.markClean).not.toHaveBeenCalled();
+    expect(f.exit).not.toHaveBeenCalled();
+    expect(ordinary.destroyed).toBe(false);
+    if (budgetExpires) {
+      await vi.waitFor(() => expect(f.exit).toHaveBeenCalledWith(1));
+      expect(f.markClean).not.toHaveBeenCalled();
+      expect(f.receipt()).toMatchObject({ outcome: "timed-out", phase: "connections" });
+      return;
+    }
+    ordinaryResponse!.end(" saved");
+    await ordinaryClosed;
+    await vi.waitFor(() => expect(f.exit).toHaveBeenCalledWith(0));
+    expect(ordinary.complete).toBe(true);
+    expect(f.markClean).toHaveBeenCalledOnce();
+    expect(f.receipt().outcome).toBe("clean");
+  } finally {
+    ordinaryResponse?.end();
+    server.closeAllConnections();
+    server.close();
+  }
 });
 
 it("writes clean lifecycle evidence only after every phase has drained", async () => {

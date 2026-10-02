@@ -17,15 +17,56 @@ export interface DaemonShutdownReceipt {
 interface ServerShutdownHandle {
   close(callback: (error?: Error) => void): unknown;
   closeIdleConnections?: () => void;
-  closeAllConnections?: () => void;
 }
 
-/** Stop accepting requests, drain idle keep-alive sockets, then end remaining
- * active HTTP streams (for example SSE clients) before completing shutdown. */
+interface StreamResponse {
+  getHeader(name: string): number | string | string[] | undefined;
+  writeHead(statusCode: number, ...args: unknown[]): unknown;
+  end(): unknown;
+  once(event: "close" | "finish", listener: () => void): unknown;
+}
+
+const activeResponses = new WeakMap<object, Set<{ response: StreamResponse; contentType?: string }>>();
+
+/** Register before requests arrive so shutdown can end SSE without cutting ordinary requests. */
+export function trackHttpServerResponses(server: {
+  prependListener(event: "request", listener: (request: unknown, response: StreamResponse) => void): unknown;
+}): void {
+  if (activeResponses.has(server)) return;
+  const responses = new Set<{ response: StreamResponse; contentType?: string }>();
+  activeResponses.set(server, responses);
+  server.prependListener("request", (_request, response) => {
+    const tracked: { response: StreamResponse; contentType?: string } = { response };
+    responses.add(tracked);
+    const writeHead = response.writeHead;
+    response.writeHead = function (statusCode, ...args) {
+      // writeHead's direct headers are not cached by getHeader (including Hono's adapter).
+      const headers = typeof args[0] === "string" ? args[1] : args[0];
+      const entries: [string, unknown][] = Array.isArray(headers)
+        ? headers.flatMap((name, index) => index % 2 === 0 ? [[String(name), headers[index + 1]] as [string, unknown]] : [])
+        : headers && typeof headers === "object" ? Object.entries(headers) : [];
+      const directType = entries.find(([name]) => name.toLowerCase() === "content-type")?.[1];
+      tracked.contentType = String(directType ?? response.getHeader("content-type") ?? "");
+      return Reflect.apply(writeHead, this, [statusCode, ...args]);
+    };
+    response.once("close", () => responses.delete(tracked));
+  });
+}
+
+/** Stop accepting requests and end SSE after the grace period. Ordinary requests
+ * keep the existing whole-shutdown budget and cannot produce a premature clean stop. */
 export function closeHttpServer(server: ServerShutdownHandle, graceMs = DAEMON_HTTP_CONNECTION_GRACE_MS): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     let settled = false;
-    const forceCloseTimer = setTimeout(() => server.closeAllConnections?.(), graceMs);
+    const forceCloseTimer = setTimeout(() => {
+      try {
+        for (const { response, contentType: observedType } of activeResponses.get(server) ?? []) {
+          const contentType = String(observedType ?? response.getHeader("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
+          if (contentType === "text/event-stream") response.end();
+        }
+        server.closeIdleConnections?.();
+      } catch (error) { finish(error as Error); }
+    }, graceMs);
     const finish = (error?: Error) => {
       if (settled) return;
       settled = true;
@@ -34,6 +75,9 @@ export function closeHttpServer(server: ServerShutdownHandle, graceMs = DAEMON_H
       else resolve();
     };
     try {
+      for (const { response } of activeResponses.get(server) ?? []) {
+        response.once("finish", () => setImmediate(() => server.closeIdleConnections?.()));
+      }
       server.close(finish);
       server.closeIdleConnections?.();
     } catch (error) {
