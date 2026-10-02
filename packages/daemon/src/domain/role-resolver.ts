@@ -93,6 +93,12 @@ export function resolveExports(
   const roleHookRefs = new Set(role.hooks ?? []);
   const deferred: DeferredExport[] = [];
 
+  for (const hookRef of roleHookRefs) {
+    if (!allHooks.some((hook) => hook.source === hookRef)) {
+      throw new Error(`Role '${roleName}' references nonexistent hook: '${hookRef}'`);
+    }
+  }
+
   for (const hook of allHooks) {
     if (roleHookRefs.size === 0 || roleHookRefs.has(hook.source)) {
       deferred.push({

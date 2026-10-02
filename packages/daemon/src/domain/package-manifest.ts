@@ -170,6 +170,7 @@ export function validateManifest(raw: unknown): ValidationResult {
     // Collect export names for role validation
     const skillNames = new Set<string>();
     const guidanceNames = new Set<string>();
+    const hookSources = new Set<string>();
 
     // skills
     if (Array.isArray(exports["skills"])) {
@@ -269,6 +270,8 @@ export function validateManifest(raw: unknown): ValidationResult {
           errors.push("Hook export: source is required");
         } else if (hasPathTraversal(h["source"] as string)) {
           errors.push(`Hook export source must not contain path traversal: '${h["source"]}'`);
+        } else {
+          hookSources.add(h["source"] as string);
         }
       }
     }
@@ -297,6 +300,13 @@ export function validateManifest(raw: unknown): ValidationResult {
           for (const guidanceRef of role["guidance"] as string[]) {
             if (!guidanceNames.has(guidanceRef)) {
               errors.push(`Role '${role["name"]}' references nonexistent guidance: '${guidanceRef}'`);
+            }
+          }
+        }
+        if (Array.isArray(role["hooks"])) {
+          for (const hookRef of role["hooks"] as string[]) {
+            if (!hookSources.has(hookRef)) {
+              errors.push(`Role '${role["name"]}' references nonexistent hook: '${hookRef}'`);
             }
           }
         }
