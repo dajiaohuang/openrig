@@ -135,7 +135,7 @@ export function assessNativeResumeProbe(
         detail: "Claude is at its interactive prompt and the exact managed resume process was verified.",
       };
     }
-    if (paneCommand === "claude") {
+    if (paneCommand === "claude" && input.claudeResumeIdentityVerified !== false) {
       return {
         status: "resumed",
         code: "active_runtime",

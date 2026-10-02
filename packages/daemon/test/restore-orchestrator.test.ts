@@ -3038,10 +3038,12 @@ describe("RestoreOrchestrator", () => {
       expect(tmux.sendText).not.toHaveBeenCalled();
     });
 
-    it.each(["background", "ambiguous", "argv-lookalike", "missing-metadata"])("does not reconcile a headerless Claude prompt with %s resume evidence", async (failure) => {
+    it.each(["background", "ambiguous", "argv-lookalike", "missing-metadata"].flatMap((failure) =>
+      ["2.1.283", "claude"].map((paneCommand) => [failure, paneCommand])
+    ))("does not reconcile headerless %s evidence under %s", async (failure, paneCommand) => {
       const tmux = mockTmuxForReconciler();
       vi.mocked(tmux.hasSession).mockResolvedValue(true);
-      vi.mocked(tmux.getPaneCommand).mockResolvedValue("2.1.283");
+      vi.mocked(tmux.getPaneCommand).mockResolvedValue(paneCommand);
       vi.mocked(tmux.capturePaneContent).mockResolvedValue("Restored conversation\n❯\n⏵⏵ bypass permissions on");
       const seeded = seedFailedAttempt({ restoreOutcome: "failed", withResumeToken: true });
       const originalOutcome = db.prepare("SELECT payload FROM events WHERE type = 'restore.completed'").get();
