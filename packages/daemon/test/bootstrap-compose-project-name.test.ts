@@ -159,7 +159,7 @@ edges: []
       const first = rigRepo.createRig("demo-rig");
       const second = rigRepo.createRig("demo-rig-2");
       for (const rig of [first, second]) {
-        expect(await hook!(rig.id)).toEqual({ ok: true });
+        expect(await hook!(rig.id)).toMatchObject({ ok: true });
         const stored = rigRepo.getServicesRecord(rig.id)!;
         const expected = explicit ?? deriveComposeProjectName(rig.id);
         expect(stored.projectName).toBe(expected);

@@ -616,7 +616,7 @@ export class RigRepository {
     const rig = this.db.prepare("SELECT 1 AS present FROM rigs WHERE id = ?").get(rigId);
     if (!rig) throw new Error(`Rig not found: ${rigId}`);
     // Keep the fallback aligned with bootstrap's unique, stable rig-ID default.
-    const projectName = record.projectName ?? deriveComposeProjectName(rigId);
+    const projectName = record.projectName ?? this.getServicesRecord(rigId)?.projectName ?? deriveComposeProjectName(rigId);
     this.db.prepare(`
       INSERT INTO rig_services (
         rig_id,

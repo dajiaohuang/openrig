@@ -167,6 +167,19 @@ describe("RigSpec services contract", () => {
     }
   });
 
+  it("preserves a legacy project's identity when updating without a project name", () => {
+    const db = createServicesDb();
+    try {
+      const repo = new RigRepository(db);
+      const rig = repo.createRig("services-rig");
+      const input = { kind: "compose" as const, specJson: "{}", rigRoot: "/tmp/services-rig", composeFile: "compose.yaml" };
+      repo.setServicesRecord(rig.id, { ...input, projectName: "legacy-name-derived-project" });
+      expect(repo.setServicesRecord(rig.id, { ...input, latestReceiptJson: "{}" }).projectName)
+        .toBe("legacy-name-derived-project");
+      expect(repo.setServicesRecord(rig.id, { ...input, projectName: "replacement" }).projectName).toBe("replacement");
+    } finally { db.close(); }
+  });
+
   it("createDaemon wires the rig_services migration", async () => {
     const { createDaemon } = await import("../src/startup.js");
     const { db } = await createDaemon({ dbPath: ":memory:" });

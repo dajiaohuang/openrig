@@ -762,7 +762,7 @@ export class BootstrapOrchestrator {
     rigRoot: string,
     stages: BootstrapStageResult[],
     errors: string[],
-  ): Promise<((rigId: string, replacedRigIds?: readonly string[]) => Promise<{ ok: true } | { ok: false; code: string; message: string }>) | undefined> {
+  ): Promise<((rigId: string, replacedRigIds?: readonly string[]) => Promise<{ ok: true; rollback?: () => Promise<void> } | { ok: false; code: string; message: string; retainRig?: boolean }>) | undefined> {
     if (!this.deps.serviceOrchestrator || !this.deps.rigRepo) return undefined;
 
     // Parse and normalize via the canonical pod-aware codec/schema path
@@ -808,6 +808,12 @@ export class BootstrapOrchestrator {
       const inheritedProject = predecessorProjects.values().next().value as string | undefined;
       const projectName = configuredProjectName ?? inheritedProject ?? deriveComposeProjectName(rigId);
       const preservesPredecessor = predecessorProjects.has(projectName);
+      const rollback = preservesPredecessor ? undefined : async () => {
+        // A failed launch is rolled back regardless of the normal shutdown policy.
+        // Never delete volumes or tear down an inherited predecessor project.
+        const result = await serviceOrch.teardown(rigId, { policyOverride: "down" });
+        if (!result.ok) throw new Error(result.error);
+      };
       const persistedServices = { ...services, projectName };
 
       rigRepo.setServicesRecord(rigId, {
@@ -828,23 +834,13 @@ export class BootstrapOrchestrator {
           status: "failed",
           detail: { code: bootResult.code, error: bootResult.error, receipt: bootResult.receipt },
         });
-        // OPR.0.3.2.22 Bug 2 follow-up — serviceOrch.boot can already have
-        // started compose resources before failing during status/wait. The
-        // PodRigInstantiator will delete the rig record next, which cascades
-        // away rig_services and the normal teardown handle — so any
-        // already-started compose containers would orphan. Tear them down
-        // here best-effort while the rig handle still exists, except when
-        // reusing a predecessor project that must survive rollback. Teardown
-        // errors are swallowed so they cannot mask the boot failure that
-        // is the load-bearing return.
+        // Keep the cleanup handle until new-project rollback has succeeded.
         try {
-          if (!preservesPredecessor) await serviceOrch.teardown(rigId);
-        } catch {
-          // Best-effort. If teardown also fails, the boot-failure error
-          // is what the operator needs; manual `docker compose down`
-          // remains available with the compose file path from the spec.
+          await rollback?.();
+        } catch (error) {
+          return { ok: false, code: "service_boot_failed", retainRig: true, message: `Service boot failed: ${bootResult.error}; service cleanup failed; rig ${rigId} retained for recovery: ${String(error)}` };
         }
-        return { ok: false, code: "service_boot_failed", message: `Service boot failed: ${bootResult.error}` };
+        return { ok: false, code: "service_boot_failed", message: `Service boot failed: ${bootResult.error}${preservesPredecessor ? `; inherited Compose project ${projectName} retained. Compose up may have changed its runtime; inspect the project before retrying.` : ""}` };
       }
 
       stages.push({
@@ -852,7 +848,7 @@ export class BootstrapOrchestrator {
         status: "ok",
         detail: { receipt: bootResult.receipt, health: bootResult.health },
       });
-      return { ok: true };
+      return { ok: true, rollback };
     };
   }
 
