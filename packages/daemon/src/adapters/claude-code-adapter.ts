@@ -204,7 +204,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
               const textResult = await this.tmux.sendText(binding.tmuxSession, content);
               if (!textResult.ok) throw new Error(textResult.message);
               await this.sleep(200);
-              const submitResult = await this.tmux.sendKeys(binding.tmuxSession, ["C-m"]);
+              const submitResult = await this.tmux.sendKeys(binding.tmuxSession, ["Enter"]);
               if (!submitResult.ok) throw new Error(submitResult.message);
             }
             break;
@@ -261,6 +261,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     // resume-cmd builder are the named A2 restore-parity follow-on, not this atom.
     const model = binding.model?.trim();
     const modelArg = model ? ` --model ${shellQuote(model)}` : "";
+    const effort = binding.effort?.trim();
+    const effortArg = effort ? ` --effort ${shellQuote(effort)}` : "";
 
     // Fork branch: build `claude --resume <parent> --fork-session --name <seat>`
     // and capture the NEW post-fork session id. The parent token is NEVER
@@ -276,9 +278,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       if (!parentId) {
         return { ok: false, error: "claude-code fork: forkSource.value is required (parent native_id)" };
       }
-      const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...(model ? ["--model", model] : []),
+      const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []),
         "--resume", parentId, "--fork-session", "--name", opts.name])
-        : `${rendererPrefix}claude ${permissionMode}${modelArg} --resume ${parentId} --fork-session --name ${opts.name}`;
+        : `${rendererPrefix}claude ${permissionMode}${modelArg}${effortArg} --resume ${parentId} --fork-session --name ${opts.name}`;
       const textResult = managed ? await this.tmux.sendShellCommand(binding.tmuxSession, cmd, managed.assertCurrent)
         : await this.tmux.sendText(binding.tmuxSession, cmd);
       if (!textResult.ok) {
@@ -304,10 +306,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     }
 
     const generatedSessionId = opts.resumeToken ? null : this.sessionIdFactory();
-    const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...(model ? ["--model", model] : []),
+    const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []),
       ...(opts.resumeToken ? ["--resume", opts.resumeToken] : ["--session-id", generatedSessionId!]), "--name", opts.name]) : opts.resumeToken
-      ? `${rendererPrefix}claude ${permissionMode}${modelArg} --resume ${opts.resumeToken} --name ${opts.name}`
-      : `${rendererPrefix}claude ${permissionMode}${modelArg} --session-id ${generatedSessionId} --name ${opts.name}`;
+      ? `${rendererPrefix}claude ${permissionMode}${modelArg}${effortArg} --resume ${opts.resumeToken} --name ${opts.name}`
+      : `${rendererPrefix}claude ${permissionMode}${modelArg}${effortArg} --session-id ${generatedSessionId} --name ${opts.name}`;
 
     const textResult = managed ? await this.tmux.sendShellCommand(binding.tmuxSession, cmd, managed.assertCurrent)
       : await this.tmux.sendText(binding.tmuxSession, cmd);
@@ -357,7 +359,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   }
 
   /** Best-effort public seam for user-scope Claude bootstrap used by managed sessions. */
-  ensureManagedBootstrap(binding: { cwd?: string | null; tmuxSession?: string | null }): void {
+  ensureManagedBootstrap(binding: { nodeId?: string; cwd?: string | null; tmuxSession?: string | null; permissionMode?: NodeBinding["permissionMode"] }): void {
     this.provisionManagedBootstrap(binding);
   }
 
@@ -366,9 +368,12 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   private async assessManagedProbe(binding: NodeBinding, paneCommand: string | null, paneContent: string) {
     const input = { runtime: "claude-code", paneCommand, paneContent };
     const probe = assessNativeResumeProbe(input);
-    // Only the new headerless auto-mode case needs this additional observation.
-    // Screen-only callers cannot opt themselves into managed launch readiness.
-    if (probe.code !== "claude_auto_identity_required") return probe;
+    // Headerless managed launches (including bypass mode) use the same readiness
+    // precedence as resume. This candidate result is returned only after the
+    // exact launch identity below is proved; screen text alone is insufficient.
+    const verifiedProbe = assessNativeResumeProbe({ ...input,
+      claudeAutoIdentityVerified: true, claudeResumeIdentityVerified: true });
+    if (probe.status === "resumed" || verifiedProbe.status !== "resumed") return probe;
     const launch = this.autoLaunches.get(binding.nodeId);
     if (!launch || !binding.tmuxPane || !binding.tmuxSession
       || launch.binding.id !== binding.id || launch.binding.tmuxPane !== binding.tmuxPane
@@ -390,7 +395,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       if (this.autoLaunches.get(binding.nodeId) !== launch || currentPanes.length !== 1
         || currentPanes[0]?.id !== binding.tmuxPane
         || await this.tmux.getPanePid(binding.tmuxSession) !== native.panePid) return probe;
-      return assessNativeResumeProbe({ ...input, claudeAutoIdentityVerified: true });
+      return verifiedProbe;
     } catch { return probe; }
   }
 
@@ -670,11 +675,64 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     return resolveConcreteHint(path, content);
   }
 
-  private provisionManagedBootstrap(binding: { cwd?: string | null; tmuxSession?: string | null }): void {
+  private provisionManagedBootstrap(binding: { nodeId?: string; cwd?: string | null; tmuxSession?: string | null; permissionMode?: NodeBinding["permissionMode"] }): void {
     // OPR.0.4.8.2 agnostic rip-out: provisionRigPermissions (C2) removed — OpenRig no longer
     // authors any config-file permission policy. Trust/onboarding (C3/C4) are neutral plumbing, kept.
-    this.provisionWorkspaceTrust(binding.cwd ?? null);
-    this.provisionOnboardingState();
+    const home = this.fs.homedir ?? (typeof process !== "undefined" ? process.env.HOME : undefined);
+    // Match launchHarness: an explicit permission mode exports the selected home to the child, so
+    // only that home is provisioned.
+    const managed = binding.permissionMode !== undefined ? this.claudeManagedLaunch : undefined;
+    const cwd = binding.cwd === undefined && managed && binding.nodeId
+      ? managed.boundCwd(binding.nodeId) : binding.cwd;
+    const statePaths: string[] = [];
+    const failures: string[] = [];
+    if (managed) {
+      if (cwd) statePaths.push(managed.configPaths(cwd).statePath);
+    } else {
+      if (home) statePaths.push(nodePath.join(home, ".claude.json"));
+      // A classic seat types `claude` into its pane's shell, which inherits the tmux server's
+      // environment, not the daemon's, so the bootstrap cannot see which home that child reads.
+      // When the daemon selects CLAUDE_CONFIG_DIR, provision that home too. This deliberately
+      // replaces #565's rule that classic bootstrap writes exactly one file and leaves the
+      // selected home untouched: a child that inherits the daemon's selection read neither.
+      try {
+        const selectedCwd = cwd ?? (binding.nodeId ? this.claudeManagedLaunch?.boundCwd(binding.nodeId) : undefined);
+        const selected = selectedCwd ? this.claudeManagedLaunch?.selectedStatePath(selectedCwd) : undefined;
+        if (selected && !statePaths.includes(selected)) statePaths.push(selected);
+      } catch (err) {
+        failures.push((err as Error).message);
+      }
+    }
+    // Each file is merged on its own: unmergeable state in one is preserved and reported,
+    // and never stops the other from being provisioned.
+    for (const statePath of statePaths) {
+      try {
+        this.provisionClaudeState(statePath, cwd);
+      } catch (err) {
+        failures.push(`${statePath}: ${(err as Error).message}`);
+      }
+    }
+    if (failures.length > 0) throw new Error(failures.join("; "));
+  }
+
+  private provisionClaudeState(statePath: string, cwd: string | null | undefined): void {
+    // Preserve every existing field. Unreadable/malformed/non-object state is
+    // left untouched and reported through the caller's best-effort bootstrap boundary.
+    const state = this.fs.exists(statePath) ? this.readJsonObjectStrict(statePath) : {};
+    if (cwd) {
+      const projects = this.readJsonObjectField(state, "projects");
+      if (Object.hasOwn(state, "projects") && projects !== state["projects"]) throw new Error("Claude bootstrap projects must be a JSON object; existing state preserved.");
+      for (const trustKey of this.workspaceTrustKeys(cwd)) {
+        const projectState = this.readJsonObjectField(projects, trustKey);
+        if (Object.hasOwn(projects, trustKey) && projectState !== projects[trustKey]) throw new Error("Claude bootstrap project state must be a JSON object; existing state preserved.");
+        projectState["hasTrustDialogAccepted"] = true;
+        projects[trustKey] = projectState;
+      }
+      state["projects"] = projects;
+    }
+    state["hasCompletedOnboarding"] = true;
+    this.fs.mkdirp(nodePath.dirname(statePath));
+    this.fs.writeFile(statePath, JSON.stringify(state, null, 2));
   }
 
   // OPR.0.4.8.2 agnostic rip-out: the CONVENIENCE_BASELINE (global `Bash(rig:*)` allow) and its
@@ -682,35 +740,6 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   // `_openrig_provenance` marker) are DELETED. OpenRig no longer authors any config-file permission
   // policy; the harness-native permission surface is the control surface. Existing provenance-marked
   // user files are NOT retro-scrubbed — the new code simply never touches settings.json.
-
-  private provisionWorkspaceTrust(cwd: string | null): void {
-    if (!cwd) return;
-    const home = this.fs.homedir ?? (typeof process !== "undefined" ? process.env.HOME : undefined);
-    if (!home) return;
-
-    const statePath = nodePath.join(home, ".claude.json");
-    const state = this.readJsonObject(statePath);
-    const projects = this.readJsonObjectField(state, "projects");
-
-    for (const trustKey of this.workspaceTrustKeys(cwd)) {
-      const projectState = this.readJsonObjectField(projects, trustKey);
-      projectState["hasTrustDialogAccepted"] = true;
-      projects[trustKey] = projectState;
-    }
-
-    state["projects"] = projects;
-    this.fs.writeFile(statePath, JSON.stringify(state, null, 2));
-  }
-
-  private provisionOnboardingState(): void {
-    const home = this.fs.homedir ?? (typeof process !== "undefined" ? process.env.HOME : undefined);
-    if (!home) return;
-
-    const statePath = nodePath.join(home, ".claude.json");
-    const state = this.readJsonObject(statePath);
-    state["hasCompletedOnboarding"] = true;
-    this.fs.writeFile(statePath, JSON.stringify(state, null, 2));
-  }
 
   private workspaceTrustKeys(cwd: string): string[] {
     const keys = new Set<string>([nodePath.resolve(cwd)]);
@@ -754,7 +783,17 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   /**
    * Best-effort: provision the OpenRig context collector for managed Claude sessions.
    * Writes a collector script and merges status line config into .claude/settings.local.json.
-   * Idempotent: safe to call multiple times (merge preserves existing settings).
+   * Idempotent: safe to call multiple times (merge preserves existing settings). A user's own
+   * status line command (anything but the exact command written below), or a file that does not
+   * parse, is left as it is. The collector then never runs for that seat. While a valid sidecar
+   * from an earlier collector is retained, context usage (shown as stale once it ages) and Claude
+   * resume-token capture keep using it. That sidecar's session id may belong to an earlier Claude
+   * session, so capture can record an older session id for such a seat. Once none exists:
+   * - context usage reads unknown (`missing_sidecar`);
+   * - resume-token capture at adoption or handover is skipped (`missing_sidecar`);
+   * - its provider-usage row is an explicit unknown (`no_statusline_cache_yet`) unless an earlier
+   *   cache for that seat is retained.
+   * The read-modify-write below is not safe against a concurrent writer of the same file.
    */
   private provisionContextCollector(binding: { cwd?: string | null; tmuxSession?: string | null }): void {
     if (!this.stateDir || !this.collectorAssetPath || !binding.cwd) return;
@@ -772,14 +811,29 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const settingsPath = nodePath.join(binding.cwd, ".claude", "settings.local.json");
     this.fs.mkdirp(nodePath.dirname(settingsPath));
 
-    const existing = this.readJsonObject(settingsPath);
-
+    // The seat cwd can be a shared repo whose project-local settings other sessions read (#421).
+    // Like the activity hooks, never clobber text we cannot parse. An empty file holds no settings
+    // and is treated as `{}`. Valid JSON that is not an object (for example `[]`) is still
+    // replaced, as before.
+    let existing: Record<string, unknown> = {};
+    if (this.fs.exists(settingsPath)) {
+      const text = this.fs.readFile(settingsPath);
+      if (text.trim() !== "") {
+        let parsed: unknown;
+        try { parsed = JSON.parse(text); } catch { return; }
+        if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) existing = parsed as Record<string, unknown>;
+      }
+    }
+    const statusLine = typeof existing["statusLine"] === "object" && existing["statusLine"] !== null
+      ? existing["statusLine"] as Record<string, unknown> : {};
+    // A user's own status line command wins; only OpenRig's collector command is installed or refreshed.
+    // If this command's shape changes, keep the old shape recognised in isOwnedCollectorCommand, or
+    // seats holding it will never be refreshed.
     const collectorCmd = `node ${collectorDest} ${contextDir} ${providerUsageDir}`;
-    existing["statusLine"] = {
-      ...(typeof existing["statusLine"] === "object" && existing["statusLine"] !== null ? existing["statusLine"] as Record<string, unknown> : {}),
-      type: "command",
-      command: collectorCmd,
-    };
+    const current = statusLine["command"];
+    if (typeof current === "string" && current.trim() !== "" && current !== collectorCmd && !isOwnedCollectorCommand(current)) return;
+
+    existing["statusLine"] = { ...statusLine, type: "command", command: collectorCmd };
 
     this.fs.writeFile(settingsPath, JSON.stringify(existing, null, 2));
   }
@@ -902,6 +956,21 @@ const OWNED_RELAY_SUFFIX = "/.openrig/hooks/scripts/activity-relay.cjs";
 
 function hookCommand(hook: unknown): string | undefined {
   return isPlainObject(hook) && typeof hook["command"] === "string" ? (hook["command"] as string) : undefined;
+}
+
+// OpenRig-owned context collector. provisionContextCollector writes exactly
+// `node <cwd>/.openrig/context-collector.cjs <contextDir> <providerUsageDir>`, unquoted; older
+// releases wrote the same command without `<providerUsageDir>`. Ownership is either shape with any
+// (possibly stale) paths, on one line. A command that merely contains the path, composed with `;`,
+// `&&`, a pipe or a newline, or naming another file such as `.cjs.backup`, is the user's.
+const OWNED_COLLECTOR_SUFFIX = nodePath.sep + nodePath.join(".openrig", "context-collector.cjs");
+
+function isOwnedCollectorCommand(cmd: string): boolean {
+  if (/[\r\n]/.test(cmd)) return false;
+  const tokens = cmd.trim().split(/\s+/);
+  if ((tokens.length !== 3 && tokens.length !== 4) || tokens[0] !== "node") return false;
+  if (tokens.some((token) => /[;&|<>`$()'"\\]/.test(token))) return false;
+  return tokens[1]!.endsWith(OWNED_COLLECTOR_SUFFIX);
 }
 
 function isOwnedRelayCommand(cmd: string | undefined): boolean {

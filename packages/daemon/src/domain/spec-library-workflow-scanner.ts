@@ -24,7 +24,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { WorkflowSpec, WorkflowExitKind, WorkflowAgentHarness, WorkflowGateSpec } from "./workflow-types.js";
-import type { WorkflowSpecCache } from "./workflow-spec-cache.js";
+import { RETAINED_STATUS, type WorkflowSpecCache } from "./workflow-spec-cache.js";
 import type { EventBus } from "./event-bus.js";
 
 export interface SpecLibraryWorkflowEntry {
@@ -155,6 +155,8 @@ export function scanWorkflowSpecs(opts: ScanWorkflowSpecsOpts): SpecLibraryWorkf
 
   const out: SpecLibraryWorkflowEntry[] = [];
   for (const row of rows) {
+    // A version kept only for unfinished work after its file was deleted is not discoverable (#511).
+    if (row.status === RETAINED_STATUS) continue;
     const status: "valid" | "error" = row.status === "error" ? "error" : "valid";
     const isBuiltIn = opts.workflowBuiltinSpecsDir
       ? isUnderDir(row.source_path, opts.workflowBuiltinSpecsDir)
@@ -232,7 +234,7 @@ export function getWorkflowReview(opts: ScanWorkflowSpecsOpts & { name: string; 
   } catch {
     return null;
   }
-  if (!row) return null;
+  if (!row || row.status === RETAINED_STATUS) return null;
 
   let roles: WorkflowSpec["roles"];
   let steps: WorkflowSpec["steps"];
@@ -329,13 +331,27 @@ export function getWorkflowReview(opts: ScanWorkflowSpecsOpts & { name: string; 
 }
 
 export function workflowLibraryId(name: string, version: string): string {
+  // Legacy IDs round-trip every name, but only versions without a colon.
+  // An opaque tuple keeps colon-bearing versions distinct without changing
+  // any already-unambiguous ID. Legacy valid IDs always contain another colon.
+  if (version.includes(":")) return `workflow:@${Buffer.from(JSON.stringify([name, version])).toString("base64url")}`;
   return `workflow:${name}:${version}`;
 }
 
 export function parseWorkflowLibraryId(id: string): { name: string; version: string } | null {
   if (!id.startsWith("workflow:")) return null;
   const rest = id.slice("workflow:".length);
-  // version may be numeric or an arbitrary string; split on the LAST `:`.
+  if (rest.startsWith("@") && !rest.includes(":")) {
+    try {
+      const encoded = rest.slice(1);
+      const bytes = Buffer.from(encoded, "base64url");
+      if (!encoded || bytes.toString("base64url") !== encoded) return null;
+      const pair: unknown = JSON.parse(bytes.toString("utf8"));
+      if (!Array.isArray(pair) || pair.length !== 2 || pair.some(value => typeof value !== "string")) return null;
+      return { name: pair[0], version: pair[1] };
+    } catch { return null; }
+  }
+  // Preserve legacy names (including literal percent sequences and colons).
   const lastColon = rest.lastIndexOf(":");
   if (lastColon === -1) return null;
   return { name: rest.slice(0, lastColon), version: rest.slice(lastColon + 1) };
@@ -446,8 +462,10 @@ export function scanWorkflowSpecFolder(
     // precision; without this floor a freshly-written file whose mtime
     // is `T - 999ms` would always look "newer" than its cached_at at
     // exactly `T` and never skip.
+    // A path can hold several cached versions plus a diagnostic row (#503); the most
+    // recently written row is the one that reflects the file's last scan.
     const cachedAt = opts.db
-      .prepare(`SELECT cached_at, source_hash FROM workflow_specs WHERE source_path = ?`)
+      .prepare(`SELECT cached_at, source_hash FROM workflow_specs WHERE source_path = ? AND status != '${RETAINED_STATUS}' ORDER BY cached_at DESC, rowid DESC LIMIT 1`)
       .get(filePath) as { cached_at: string; source_hash: string } | undefined;
     if (cachedAt) {
       const cachedAtMs = Date.parse(cachedAt.cached_at);
@@ -459,7 +477,10 @@ export function scanWorkflowSpecFolder(
           // A same-second edit shares the timestamp bucket. Consult the
           // cache's existing content hash before treating it as unchanged.
           try {
-            unchanged = createHash("sha256").update(readFileSync(filePath)).digest("hex") === cachedAt.source_hash;
+            // Hash the UTF-8 text exactly the way the cache hashes it on
+            // write (not the raw bytes): for files that are not clean UTF-8
+            // the two digests differ and every scan would re-parse.
+            unchanged = createHash("sha256").update(readFileSync(filePath, "utf-8")).digest("hex") === cachedAt.source_hash;
           } catch { /* The existing readThrough path records the diagnostic. */ }
         }
         if (unchanged) {
@@ -488,11 +509,16 @@ export function scanWorkflowSpecFolder(
         // empty hash so the next scan re-evaluates
         sourceHash = "";
       }
-      opts.cache.writeDiagnostic({
-        sourcePath: filePath,
-        sourceHash,
-        errorMessage: message,
-      });
+      try {
+        opts.cache.writeDiagnostic({
+          sourcePath: filePath,
+          sourceHash,
+          errorMessage: message,
+        });
+      } catch (writeErr) {
+        // One file's diagnostic must not end the scan of the rest of the folder (#511).
+        console.error(`workflow spec scan: could not record the parse error for ${filePath}: ${writeErr instanceof Error ? writeErr.message : String(writeErr)}`);
+      }
       result.errors += 1;
     }
   }
@@ -517,7 +543,15 @@ export function scanWorkflowSpecFolder(
     // literal directory owns deletion; neighboring cache rows must survive.
     if (!row.source_path.startsWith(folderPrefix)) continue;
     if (seenPaths.has(row.source_path)) continue;
-    const removed = opts.cache.removeBySourcePath(row.source_path);
+    if (!row.spec_id) continue;
+    // #511: a version that unfinished work is pinned to stays readable until that work ends;
+    // a later scan removes it. Every other row of the vanished file goes, one event per version.
+    const identity = opts.cache.storedIdentity(row.spec_id);
+    if (identity && opts.cache.isPinnedByUnfinishedWork(identity.name, identity.version)) {
+      opts.cache.retain(row.spec_id);
+      continue;
+    }
+    const removed = opts.cache.removeBySpecId(row.spec_id);
     if (removed > 0) {
       result.removed += removed;
       // OQ-4 audit-log: record the disappearance so operators can trace

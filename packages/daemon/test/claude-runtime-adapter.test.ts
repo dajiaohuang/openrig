@@ -104,6 +104,52 @@ describe("launchHarness — per-agent --model reaches the claude launch (51-07 A
   });
 });
 
+describe("launchHarness — per-agent --effort reaches the claude launch (#75)", () => {
+  const EFFORT = "high";
+  const POSTURE = claudePostureFlag(process.env, undefined);
+
+  const withEffort = (effort?: string, model?: string): NodeBinding => ({ ...makeBinding(), effort, model } as NodeBinding);
+  const adapterWith = (tmux: TmuxAdapter) => new ClaudeCodeAdapter({ tmux, fsOps: mockFs(), sleep: async () => {} });
+  const lastCmd = (tmux: TmuxAdapter): string => {
+    const calls = (tmux.sendText as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    return (calls[calls.length - 1]?.[1] as string) ?? "";
+  };
+
+  it("FRESH launch emits --effort when the binding declares one", async () => {
+    const tmux = mockTmux();
+    await adapterWith(tmux).launchHarness(withEffort(EFFORT), { name: "seat" });
+    expect(lastCmd(tmux)).toContain(`--effort '${EFFORT}'`);
+  });
+
+  it("RESUME launch emits --effort", async () => {
+    const tmux = mockTmux();
+    await adapterWith(tmux).launchHarness(withEffort(EFFORT), { name: "seat", resumeToken: "tok-123" });
+    expect(lastCmd(tmux)).toContain(`--effort '${EFFORT}'`);
+  });
+
+  it("FORK launch emits --effort", async () => {
+    const tmux = mockTmux();
+    await adapterWith(tmux).launchHarness(withEffort(EFFORT), { name: "seat", forkSource: { kind: "native_id", value: "parent-xyz" } });
+    expect(lastCmd(tmux)).toContain(`--effort '${EFFORT}'`);
+  });
+
+  it("emits both --model and --effort when both declared", async () => {
+    const tmux = mockTmux();
+    await adapterWith(tmux).launchHarness(withEffort(EFFORT, "claude-haiku-4-5"), { name: "seat", resumeToken: "tok-123" });
+    expect(lastCmd(tmux)).toContain(`--model 'claude-haiku-4-5'`);
+    expect(lastCmd(tmux)).toContain(`--effort '${EFFORT}'`);
+  });
+
+  it("absent effort → command byte-identical", async () => {
+    const tmuxNo = mockTmux(); await adapterWith(tmuxNo).launchHarness(withEffort(undefined), { name: "seat", resumeToken: "T" });
+    const tmuxYes = mockTmux(); await adapterWith(tmuxYes).launchHarness(withEffort(EFFORT), { name: "seat", resumeToken: "T" });
+    const noEffort = lastCmd(tmuxNo), withEff = lastCmd(tmuxYes);
+    expect(noEffort).toContain(POSTURE);
+    expect(withEff).toContain(POSTURE);
+    expect(withEff.replace(` --effort '${EFFORT}'`, "")).toBe(noEffort);
+  });
+});
+
 // OPR.0.5.3.1 slice 01 — Claude scrollback restore. Every managed launch path must prepend
 // CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 by default (classic renderer -> native scrollback);
 // an explicit OPENRIG_CLAUDE_DISABLE_ALTERNATE_SCREEN=0 opts back into fullscreen (byte-identical
@@ -263,14 +309,14 @@ describe("Claude Code runtime adapter", () => {
     };
     await adapter.deliverStartup([file], makeBinding());
     expect(tmux.sendText).toHaveBeenCalledWith("r01-impl", "echo hello");
-    expect(tmux.sendKeys).toHaveBeenCalledWith("r01-impl", ["C-m"]);
+    expect(tmux.sendKeys).toHaveBeenCalledWith("r01-impl", ["Enter"]);
   });
 
   // OPR.0.3.3.16 - a >100KB send_text startup pack must still travel through the
-  // sendText -> sleep -> sendKeys(["C-m"]) sequence unchanged. The large-payload
+  // sendText -> sleep -> sendKeys(["Enter"]) sequence unchanged. The large-payload
   // buffer mechanics live in TmuxAdapter; the adapter's job is to hand the full
   // content to sendText and fire the single trailing submit.
-  it("delivers a large (>100KB) send_text startup file via sendText then submits with C-m", async () => {
+  it("delivers a large (>100KB) send_text startup file via sendText then submits with Enter", async () => {
     const tmux = mockTmux();
     const big = "L".repeat(120 * 1024);
     const fs = mockFs({ "/rig/startup/big-pack.md": big });
@@ -287,7 +333,7 @@ describe("Claude Code runtime adapter", () => {
     // The full payload is handed to sendText (TmuxAdapter routes it to the buffer path).
     expect(tmux.sendText).toHaveBeenCalledWith("r01-impl", big);
     // Single trailing submit preserved.
-    expect(tmux.sendKeys).toHaveBeenCalledWith("r01-impl", ["C-m"]);
+    expect(tmux.sendKeys).toHaveBeenCalledWith("r01-impl", ["Enter"]);
   });
 
   // T6: duplicate delivery is idempotent

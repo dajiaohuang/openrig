@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { parseDocument } from "yaml";
 import { runDoctorChecks, type DoctorDeps } from "./doctor.js";
 import { resolveDaemonPath } from "../daemon-lifecycle.js";
+import { formatDaemonHostForUrl } from "../client.js";
 import { ConfigStore } from "../config-store.js";
 import {
   CMUX_SETTINGS_DISCLOSURE_PATH,
@@ -121,8 +122,8 @@ const BASE_RUNTIME_CONFIG_DISCLOSURE: RuntimeConfigDisclosure[] = [
   {
     scope: "global",
     runtime: "claude-code",
-    path: "~/.claude.json",
-    purpose: "Pre-trust managed workspaces and mark Claude onboarding complete.",
+    path: "~/.claude.json or <CLAUDE_CONFIG_DIR>/.claude.json",
+    purpose: "Pre-trust managed workspaces and mark Claude onboarding complete. Explicit permission modes use the launch-selected HOME/config; classic startup uses the daemon home.",
   },
   {
     scope: "project",
@@ -242,14 +243,14 @@ async function probeDaemonCmuxStatus(doctorDeps?: DoctorDeps): Promise<"availabl
   const port = config.daemon.port;
 
   try {
-    const healthRes = await fetchFn(`http://${host}:${port}/healthz`);
+    const healthRes = await fetchFn(`http://${formatDaemonHostForUrl(host)}:${port}/healthz`);
     if (!healthRes.ok) return "skipped";
   } catch {
     return "skipped";
   }
 
   try {
-    const cmuxRes = await fetchFn(`http://${host}:${port}/api/adapters/cmux/status`);
+    const cmuxRes = await fetchFn(`http://${formatDaemonHostForUrl(host)}:${port}/api/adapters/cmux/status`);
     if (!cmuxRes.ok || !cmuxRes.json) return "unavailable";
     const data = (await cmuxRes.json()) as { available?: boolean };
     return data.available ? "available" : "unavailable";

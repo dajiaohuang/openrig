@@ -143,7 +143,7 @@ describe("TmuxAdapter", () => {
 
       expect(exec).toHaveBeenCalledOnce();
       expect(exec.mock.calls[0]![0]).toBe(
-        'tmux list-panes -t \'my-session:0\' -F "#{pane_id}|#{pane_index}|#{pane_current_path}|#{pane_width}|#{pane_height}|#{pane_active}"'
+        'tmux list-panes -t \'=my-session:0\' -F "#{pane_id}|#{pane_index}|#{pane_current_path}|#{pane_width}|#{pane_height}|#{pane_active}"'
       );
     });
 
@@ -155,7 +155,7 @@ describe("TmuxAdapter", () => {
 
       expect(exec).toHaveBeenCalledOnce();
       expect(exec.mock.calls[0]![0]).toBe(
-        'tmux list-panes -t \'my session\'\"\'\"\'s:0\' -F "#{pane_id}|#{pane_index}|#{pane_current_path}|#{pane_width}|#{pane_height}|#{pane_active}"'
+        'tmux list-panes -t \'=my session\'\"\'\"\'s:0\' -F "#{pane_id}|#{pane_index}|#{pane_current_path}|#{pane_width}|#{pane_height}|#{pane_active}"'
       );
     });
 
@@ -188,6 +188,25 @@ describe("TmuxAdapter", () => {
     it("returns true when tmux has-session exits 0", async () => {
       const adapter = new TmuxAdapter(mockExec({ "has-session": { stdout: "" } }));
       expect(await adapter.hasSession("target-session")).toBe(true);
+    });
+
+    it("probes the exact session name so tmux cannot prefix-match (issue #423)", async () => {
+      const exec = vi.fn<ExecFn>().mockResolvedValue("");
+      const adapter = new TmuxAdapter(exec);
+
+      expect(await adapter.hasSession("worker@demo")).toBe(true);
+
+      expect(exec).toHaveBeenCalledOnce();
+      // tmux `=name` forces an exact match: with only `worker@demo2`
+      // present, `-t worker@demo` would wrongly succeed.
+      expect(exec.mock.calls[0]![0]).toContain("=worker@demo");
+    });
+
+    it("still reports absent when the exact probe misses", async () => {
+      const adapter = new TmuxAdapter(mockExec({
+        "has-session": { error: new Error("can't find session: =worker@demo") },
+      }));
+      expect(await adapter.hasSession("worker@demo")).toBe(false);
     });
 
     it("returns false when session not found", async () => {
@@ -289,7 +308,7 @@ describe("TmuxAdapter", () => {
 
       expect(exec).toHaveBeenCalledOnce();
       expect(exec.mock.calls[0]![0]).toBe(
-        "tmux new-session -d -s 'r01-dev1-impl' -c '/home/user/code'"
+        "tmux new-session -d -s 'r01-dev1-impl' -c '/home/user/code' -e 'OPENRIG_TRANSCRIPTS_LINES=' -e 'OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS='"
       );
     });
 
@@ -301,7 +320,7 @@ describe("TmuxAdapter", () => {
 
       expect(exec).toHaveBeenCalledOnce();
       expect(exec.mock.calls[0]![0]).toBe(
-        "tmux new-session -d -s 'r01-dev1-impl' -c '/home/user/my project/code'"
+        "tmux new-session -d -s 'r01-dev1-impl' -c '/home/user/my project/code' -e 'OPENRIG_TRANSCRIPTS_LINES=' -e 'OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS='"
       );
     });
 
@@ -313,7 +332,7 @@ describe("TmuxAdapter", () => {
 
       expect(exec).toHaveBeenCalledOnce();
       expect(exec.mock.calls[0]![0]).toBe(
-        "tmux new-session -d -s 'r01-dev'\"'\"'s session' -c '/tmp'"
+        "tmux new-session -d -s 'r01-dev'\"'\"'s session' -c '/tmp' -e 'OPENRIG_TRANSCRIPTS_LINES=' -e 'OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS='"
       );
     });
 
@@ -325,7 +344,7 @@ describe("TmuxAdapter", () => {
 
       expect(exec).toHaveBeenCalledOnce();
       expect(exec.mock.calls[0]![0]).toBe(
-        "tmux new-session -d -s 'r01-dev1-impl'"
+        "tmux new-session -d -s 'r01-dev1-impl' -e 'OPENRIG_TRANSCRIPTS_LINES=' -e 'OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS='"
       );
     });
 
@@ -358,8 +377,8 @@ describe("TmuxAdapter", () => {
       await adapter.createSession("r01-test", "/tmp");
 
       const cmd = exec.mock.calls[0]![0] as string;
-      expect(cmd).not.toContain("-e ");
-      expect(cmd).toBe("tmux new-session -d -s 'r01-test' -c '/tmp'");
+      expect(cmd).toContain("-e 'OPENRIG_TRANSCRIPTS_LINES='");
+      expect(cmd).toBe("tmux new-session -d -s 'r01-test' -c '/tmp' -e 'OPENRIG_TRANSCRIPTS_LINES=' -e 'OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS='");
     });
 
     it("returns { ok: false, code: 'duplicate_session' } on duplicate", async () => {
@@ -656,7 +675,7 @@ describe("TmuxAdapter", () => {
       // createSession with canonical name
       await adapter.createSession("dev-impl@auth-feats", "/home/user/code");
       expect(exec.mock.calls[0]![0]).toBe(
-        "tmux new-session -d -s 'dev-impl@auth-feats' -c '/home/user/code'"
+        "tmux new-session -d -s 'dev-impl@auth-feats' -c '/home/user/code' -e 'OPENRIG_TRANSCRIPTS_LINES=' -e 'OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS='"
       );
 
       // sendKeys targeting canonical name

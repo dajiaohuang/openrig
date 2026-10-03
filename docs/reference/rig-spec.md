@@ -247,7 +247,7 @@ directory's `CLAUDE.md`, including blocks written by other rigs.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `id` | string | yes | — | Pod identifier. Must not contain dots. Must be unique within the rig. Used as the first segment of session names and logical IDs. |
+| `id` | string | yes | — | Pod identifier. Must not contain dots or `@`. Must be unique within the rig. Used as the first segment of session names and logical IDs. |
 | `label` | string | yes | — | Human-readable pod name. Shown in UI explorer, graph groupings, and detail surfaces. |
 | `summary` | string | no | — | Pod description. |
 | `continuity_policy` | ContinuityPolicy | no | — | Pod-level continuity/restore policy. Controls compaction recovery, artifact management, and peer-driven restoration. |
@@ -258,6 +258,7 @@ directory's `CLAUDE.md`, including blocks written by other rigs.
 ### Pod ID Rules
 
 - Must not contain dots (`.`)
+- Must not contain `@`, which separates the pod/member portion from the rig name in session addresses
 - Must be unique across all pods in the rig
 - Becomes the first segment of the qualified logical ID: `{podId}.{memberId}`
 - Becomes the first segment of the canonical session name: `{podId}-{memberId}@{rigName}`
@@ -268,16 +269,24 @@ directory's `CLAUDE.md`, including blocks written by other rigs.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `id` | string | yes | — | Member identifier. Must not contain dots. Must be unique within the pod. |
+| `id` | string | yes | — | Member identifier. Must not contain dots or `@`. Must be unique within the pod. |
 | `agent_ref` | string | yes | — | Reference to an AgentSpec. Must start with `local:` (relative) or `path:` (absolute). Exception: `builtin:terminal` for infrastructure nodes. |
 | `profile` | string | yes | — | Profile name from the referenced AgentSpec. Use `default` for the default profile. Exception: `none` for terminal nodes. |
 | `codex_config_profile` | string | no | — | Codex-only native profile passed as `-p <name>`; letters, numbers, `_`, `.`, `-`. Separate from the AgentSpec `profile`. With the normal launch mode, this replaces OpenRig's explicit workspace-write sandbox flag. A full-bypass policy instead emits danger-full-access and omits this profile argument. |
-| `runtime` | string | yes | — | Agent runtime. Current supported values: `claude-code`, `codex`, `pi`, `omp`, `terminal`. |
+| `runtime` | string | yes | — | Agent runtime. Current supported values: `claude-code`, `codex`, `pi`, `omp`, `terminal`, `stub`. `stub` is a deterministic test harness, not an agent: a Node runner in the seat's tmux pane goes through the normal launch, skill projection, startup-file and readiness path, follows `<cwd>/.openrig/stub/script.json` when present, and calls no model. See "What a stub can and cannot prove" in `docs/as-built/test-layers.md`. |
 | `cwd` | string | yes | — | Working directory for the agent. Resolved relative to the rig root (the directory containing the rig spec). Use `"."` for the rig root itself. Can be overridden at launch time with `rig up --cwd`. |
 | `label` | string | no | — | Human-readable member name. Shown in UI when present. |
 | `model` | string | no | — | Model override. Runtime-specific (e.g., `claude-opus-4-6` for Claude Code). |
 | `restore_policy` | string | no | `resume_if_possible` | Restore behavior. One of: `resume_if_possible`, `relaunch_fresh`, `checkpoint_only`. |
 | `startup` | StartupBlock | no | — | Member-level startup files and actions. Applied only to this member. |
+
+### Pi (`runtime: pi`)
+
+`runtime: pi` launches the Pi coding agent (`pi --mode rpc`) through OpenRig's RPC runner.
+
+- **State:** Each seat uses `$OPENRIG_HOME/state/pi/<session>/agent` as its Pi agent directory, with `sessions/` beside it, instead of your default `~/.pi/agent`. The runner sets `PI_CODING_AGENT_DIR` to that directory. `<session>` is the seat's session name, unchanged; for a pod member it is `{podId}-{memberId}@{rigName}`. `$OPENRIG_HOME` defaults to `~/.openrig`. OpenRig creates these directories at launch and does not copy anything from `~/.pi/agent`.
+- **Custom models:** Pi reads `models.json` from its agent directory, so a seat reads `$OPENRIG_HOME/state/pi/<session>/agent/models.json`, not `~/.pi/agent/models.json`. Custom provider and model definitions for a seat go in that file. A seat that uses only providers Pi already includes does not need one. OpenRig does not create or write `models.json`.
+- **Credentials:** The Pi process receives only `PATH`, `HOME`, `TERM`, `LANG`, `LC_ALL`, `SHELL`, `TMPDIR`, a fixed set of OpenRig seat and instance variables, `PI_CODING_AGENT_DIR`, `PI_CODING_AGENT_SESSION_DIR`, and at most one provider key. That key is `OPENROUTER_API_KEY`, `ZAI_API_KEY` or `KIMI_API_KEY`, passed only when it is set in the seat's environment and the seat's `model` is written as `openrouter/<id>`, `zai/<id>` or `kimi-coding/<id>`. Naming that variable in `recovery.provider_auth_env_allowlist` (empty by default) makes the daemon add it, when set in the daemon's environment, to the seat's launch environment. No other variable reaches Pi, including other providers' keys and a custom provider's own key variable.
 
 ### Oh My Pi (`runtime: omp`)
 
@@ -318,6 +327,9 @@ The canonical session name is derived from the pod ID, member ID, and rig name:
 ```
 
 Example: pod `dev`, member `impl`, rig `my-team` → session `dev-impl@my-team`
+
+Pod and member IDs cannot contain `@` because the first `@` separates their portion
+of the session address from the rig name. Rig names may still contain `@`.
 
 This is human-authored (you choose the pod/member IDs) and system-validated (the system enforces the format).
 
@@ -379,6 +391,7 @@ Startup blocks can appear at three levels: rig, pod, and member. They are merged
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `path` | string | yes | — | Relative path to the file. Must be a safe relative path. |
+| `orientation` | string | no | — | Set to `role` to identify a per-seat role file for `rig queue whoami --json` and refocus. Does not change delivery or replay startup. |
 | `delivery_hint` | string | no | `auto` | How the file is delivered. One of: `auto`, `guidance_merge`, `skill_install`, `send_text`. |
 | `required` | boolean | no | `true` | Whether startup fails if this file cannot be delivered. |
 | `applies_on` | string[] | no | `[fresh_start, restore]` | When this file is delivered. Subset of: `fresh_start`, `restore`. |
@@ -547,7 +560,10 @@ continuity_policy:
 
 ## Validation Rules Summary
 
-These rules are enforced by the validator. A spec that violates any of these will be rejected by `rig spec validate` and `rig up`.
+Schema validation checks the structural rules below. Pod and member IDs containing
+`@` are additionally rejected during preflight and member creation or launch; a
+spec can pass `rig spec validate` and then fail at preflight or import. Run
+`rig spec preflight` before creation or import.
 
 1. `version` and `name` are required non-empty strings.
 2. `pods` must be a non-empty array.

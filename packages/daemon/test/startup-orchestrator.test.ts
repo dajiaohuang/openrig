@@ -38,7 +38,9 @@ function mockAdapter(overrides?: Partial<RuntimeAdapter>): RuntimeAdapter {
     project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
     deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
     checkReady: vi.fn(async () => ({ ready: true })),
-    launchHarness: vi.fn(async () => ({ ok: true })),
+    // A successful managed Claude resume returns the identity it resumed.
+    launchHarness: vi.fn(async (_binding, opts) => ({ ok: true,
+      ...(opts.resumeToken ? { resumeToken: opts.resumeToken, resumeType: "claude_id" } : {}) })),
     ...overrides,
   };
 }
@@ -152,6 +154,22 @@ describe("StartupOrchestrator", () => {
     expect(orch.canContinueFresh(seed.nodeId, seed.sessionId)).toBe(false);
   });
 
+  it("records a role binding before launch succeeds and preserves it on exact resume", async () => {
+    const seed = seedSession();
+    const orch = createOrchestrator();
+    const role: ResolvedStartupFile = { path: "role.md", absolutePath: "/fixture/role.md", ownerRoot: "/fixture", orientation: "role", deliveryHint: "send_text", required: true, appliesOn: ["fresh_start"] };
+    const read = () => db.prepare("SELECT * FROM node_startup_context WHERE node_id=?").get(seed.nodeId) as { resolved_files_json: string; created_at: string };
+    const adapter = mockAdapter({ launchHarness: vi.fn(async () => {
+      expect(JSON.parse(read().resolved_files_json)).toEqual([role]);
+      return { ok: false, recovery: "attention_required", error: "Native gate" };
+    }) });
+    expect((await orch.startNode(makeInput(seed, { adapter, resolvedStartupFiles: [role] }))).ok).toBe(false);
+    const before = read();
+    expect(before.created_at).toBeTruthy();
+    await orch.startNode(makeInput(seed, { isRestore: true, resumeToken: "original", preserveStartupContext: true }));
+    expect(read()).toEqual(before);
+  });
+
   it("exact resume retains configured fresh context while sending no replay", async () => {
     const seed = seedSession(); const orch = createOrchestrator();
     const action = makeAction({ type: "send_text", value: "configured context" });
@@ -162,6 +180,50 @@ describe("StartupOrchestrator", () => {
     expect(result.ok).toBe(true);
     expect(db.prepare("SELECT * FROM node_startup_context WHERE node_id=?").get(seed.nodeId)).toEqual(before);
     expect(adapter.deliverStartup).toHaveBeenCalledWith([], expect.anything());
+  });
+
+  it.each([undefined, "claude_id", "claude_name", "codex_id"])("managed Claude resume agrees with the requested type: %s", async (resumeType) => {
+    const seed = seedSession();
+    const adapter = mockAdapter();
+    const orch = createOrchestrator();
+    const result = await orch.startNode(makeInput(seed, {
+      adapter, isRestore: true, resumeToken: "requested-native", resumeType,
+    }));
+    const compatible = resumeType !== "codex_id";
+    expect(result).toMatchObject(compatible
+      ? { ok: true, startupStatus: "ready", continuityOutcome: "resumed" }
+      : { ok: false, startupStatus: "attention_required" });
+    expect(db.prepare("SELECT status, startup_status, resume_type, resume_token, resume_provenance FROM sessions WHERE id = ?").get(seed.sessionId))
+      .toEqual({ status: "running", startup_status: compatible ? "ready" : "attention_required",
+        resume_type: "claude_id", resume_token: "requested-native", resume_provenance: "scrape" });
+    expect(adapter.launchHarness).toHaveBeenCalledOnce();
+    expect(tmux.killSession).not.toHaveBeenCalled();
+    expect(tmux.sendText).not.toHaveBeenCalled();
+    if (!compatible) expect(orch.canContinueFresh(seed.nodeId, seed.sessionId)).toBe(false);
+  });
+
+  it.each(["missing", "late-hook"])("managed Claude resume checks final row agreement: %s", async (mode) => {
+    const seed = seedSession();
+    const token = "requested-native";
+    const adapter = mockAdapter(mode === "missing"
+      ? { launchHarness: vi.fn(async () => ({ ok: true })) } : {});
+    const t = mockTmux({ sendText: vi.fn(async () => {
+      sessionRegistry.updateResumeToken(seed.sessionId, "claude_id", "other-native", "hook");
+      return { ok: true as const };
+    }) });
+    const orch = createOrchestrator({ tmux: t });
+    const result = await orch.startNode(makeInput(seed, {
+      adapter, resumeToken: token, isRestore: true,
+      startupActions: mode === "late-hook" ? [makeAction()] : [],
+    }));
+    expect(result).toMatchObject({ ok: false, startupStatus: "attention_required" });
+    expect(db.prepare("SELECT status, startup_status, resume_token, resume_provenance FROM sessions WHERE id = ?").get(seed.sessionId))
+      .toEqual({ status: "running", startup_status: "attention_required",
+        resume_token: mode === "late-hook" ? "other-native" : null, resume_provenance: mode === "late-hook" ? "hook" : null });
+    expect(orch.canContinueFresh(seed.nodeId, seed.sessionId)).toBe(false);
+    expect(adapter.launchHarness).toHaveBeenCalledOnce();
+    expect(t.killSession).not.toHaveBeenCalled();
+    expect(db.prepare("SELECT type FROM events WHERE node_id = ? AND type = 'node.startup_ready'").all(seed.nodeId)).toEqual([]);
   });
 
   it.each(["launch", "readiness"])("pod-aware exact resume cannot continue fresh context after a %s gate", async (gate) => {
@@ -449,7 +511,7 @@ describe("StartupOrchestrator", () => {
 
     expect(result.ok).toBe(true);
     expect(tmux.sendText).toHaveBeenCalledWith("r01-impl", "/rename impl");
-    expect(tmux.sendKeys).toHaveBeenCalledWith("r01-impl", ["C-m"]);
+    expect(tmux.sendKeys).toHaveBeenCalledWith("r01-impl", ["Enter"]);
   });
 
   // T8: operator debug append executes after resolved startup
@@ -1125,6 +1187,71 @@ describe("StartupOrchestrator", () => {
   });
 
   // NS-T05: readiness retry loop
+  describe("readiness deadline", () => {
+    beforeEach(() => { vi.useFakeTimers(); });
+    afterEach(() => { vi.useRealTimers(); });
+
+    it.each([20_000, 30_000])("accepts readiness at %i ms within the 30-second budget", async (readyAfterMs) => {
+      const seed = seedSession();
+      const started = Date.now();
+      const adapter = mockAdapter({
+        checkReady: vi.fn(async () => ({ ready: Date.now() - started >= readyAfterMs })),
+      });
+      let settled = false;
+      const pending = createOrchestrator().startNode(makeInput(seed, { adapter }))
+        .then((result) => { settled = true; return result; });
+
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(14_999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(await pending).toMatchObject({ ok: true, startupStatus: "ready" });
+      expect(sessionRegistry.getSessionsForRig(seed.rigId).find((s) => s.id === seed.sessionId)?.startupStatus).toBe("ready");
+    });
+
+    it.each([500, 30_000])("does not time out before the %i ms budget expires", async (timeoutMs) => {
+      const seed = seedSession();
+      const started = Date.now();
+      const adapter = mockAdapter({
+        checkReady: vi.fn(async () => ({ ready: false, reason: `not ready at ${Date.now() - started}ms` })),
+      });
+      let settled = false;
+      const pending = createOrchestrator().startNode(makeInput(seed, { adapter, readinessTimeoutMs: timeoutMs }))
+        .then((result) => { settled = true; return result; });
+
+      await vi.advanceTimersByTimeAsync(timeoutMs - 1);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(await pending).toMatchObject({
+        ok: false,
+        startupStatus: "failed",
+        errors: [expect.stringContaining(`not ready at ${timeoutMs}ms`)],
+      });
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("preserves an attention blocker observed at the deadline", async () => {
+      const seed = seedSession();
+      const started = Date.now();
+      const adapter = mockAdapter({
+        checkReady: vi.fn(async () => Date.now() - started >= 30_000
+          ? { ready: false, code: "trust_gate", reason: "workspace trust required" }
+          : { ready: false, reason: "starting" }),
+      });
+      const pending = createOrchestrator().startNode(makeInput(seed, { adapter }));
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(await pending).toMatchObject({
+        ok: false,
+        startupStatus: "attention_required",
+        errors: ["Startup requires attention: workspace trust required"],
+      });
+    });
+  });
+
   it("readiness retries until ready", async () => {
     const seed = seedSession();
     let callCount = 0;

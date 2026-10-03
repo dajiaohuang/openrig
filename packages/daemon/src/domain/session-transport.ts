@@ -1212,7 +1212,7 @@ export class SessionTransport {
       if (targetFailure) return targetFailure;
       const submitResult = await this.runStage(
         "session_transport.submit",
-        () => this.tmuxAdapter.sendKeys(sessionName, ["C-m"]),
+        () => this.tmuxAdapter.sendKeys(sessionName, ["Enter"]),
         (result) => result.ok ? "ok" : "failed",
       );
       if (!submitResult.ok) {
@@ -1379,10 +1379,10 @@ export class SessionTransport {
 
     if (runtime === "claude-code" && bindingChanged()) return observe(changedRecipient(true));
 
-    // 5. Submit (C-m)
+    // 5. Submit (Enter)
     const submitResult = await this.runStage(
       "session_transport.submit",
-      () => this.tmuxAdapter.sendKeys(sessionName, ["C-m"]),
+      () => this.tmuxAdapter.sendKeys(sessionName, ["Enter"]),
       (result) => result.ok ? "ok" : "failed",
     );
     if (!submitResult.ok) {

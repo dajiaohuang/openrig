@@ -471,9 +471,16 @@ export class TmuxAdapter {
   }
 
   async listPanes(target: string): Promise<TmuxPane[]> {
+    // Callers name a session (optionally with a window), or an immutable tmux
+    // id. Exact session matching prevents observing a prefix neighbor's pane.
+    // A bare leading '=' belongs to the literal session name. Only qualified
+    // targets already carry tmux's encoded exact-match syntax.
+    const namedTarget = target.includes(":") && target.startsWith("=") ? target : `=${target}`;
+    const exactTarget = /^[%$@]\d+$/.test(target) ? target
+      : namedTarget.includes(":") ? namedTarget : `${namedTarget}:`;
     try {
-      const output = await this.run(["tmux", "list-panes", "-t", target, "-F", PANE_FORMAT],
-        `tmux list-panes -t ${shellQuote(target)} -F "${PANE_FORMAT}"`);
+      const output = await this.run(["tmux", "list-panes", "-t", exactTarget, "-F", PANE_FORMAT],
+        `tmux list-panes -t ${shellQuote(exactTarget)} -F "${PANE_FORMAT}"`);
       return parseLines(output, parsePaneLine);
     } catch (err) {
       if (isNoServerError(err) || isTmuxTransportAbsentError(err)) return [];
@@ -496,8 +503,9 @@ export class TmuxAdapter {
       // Use `tmux has-session` directly for reliable existence check — avoids
       // parsing format-string output from `list-sessions` which can fail when
       // tab delimiters are malformed across tmux versions.
-      await this.run(["tmux", "has-session", "-t", name],
-        `tmux has-session -t ${shellQuote(name)}`);
+      const target = `=${name}`; // canonical session name, never a prefix lookup
+      await this.run(["tmux", "has-session", "-t", target],
+        `tmux has-session -t ${shellQuote(target)}`);
       return { state: "present" }; // exit 0 = session exists
     } catch (err) {
       if (isSessionAbsenceError(err)) {
@@ -539,12 +547,21 @@ export class TmuxAdapter {
   finishLaunchBinding(session: string): void { this.freshManaged.delete(session); }
 
   private async createSessionUnchecked(name: string, cwd?: string, env?: Record<string, string>): Promise<TmuxResult> {
+    // These are the daemon's resolved capture settings, not seat overrides.
+    // An empty per-session value prevents the tmux server's inherited values
+    // from pinning an old policy over config.json inside a newly launched seat.
+    // Explicit seat settings remain authoritative.
+    const seatEnv = {
+      OPENRIG_TRANSCRIPTS_LINES: "",
+      OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS: "",
+      ...env,
+    };
     const argv = ["tmux", "new-session", "-d", "-s", name];
     if (cwd != null) argv.push("-c", cwd);
-    if (env) for (const [k, v] of Object.entries(env)) argv.push("-e", `${k}=${v}`);
+    for (const [k, v] of Object.entries(seatEnv)) argv.push("-e", `${k}=${v}`);
     const legacyParts = ["tmux", "new-session", "-d", "-s", shellQuote(name)];
     if (cwd != null) legacyParts.push("-c", shellQuote(cwd));
-    if (env) for (const [k, v] of Object.entries(env)) legacyParts.push("-e", shellQuote(`${k}=${v}`));
+    for (const [k, v] of Object.entries(seatEnv)) legacyParts.push("-e", shellQuote(`${k}=${v}`));
     try {
       await this.run(argv, legacyParts.join(" "));
       return { ok: true };
@@ -559,10 +576,10 @@ export class TmuxAdapter {
    * A file keeps payload bytes out of shell/tmux argv and its size limits.
    *   `-p`  bracket the paste when the receiving application enables that mode.
    *   `-r`  preserve raw LF. tmux's default paste-buffer replaces every LF with
-   *         CR, and CR (= `C-m` = Enter) is SUBMIT in the Claude/Codex TUIs - a
+   *         CR, and CR is SUBMIT in the Claude/Codex TUIs - a
    *         default paste of a multi-line pack would submit on every newline.
    *   `-d`  drop the buffer after a successful paste.
-   * The single trailing submit stays the caller's separate `sendKeys(["C-m"])`.
+   * The single trailing submit stays the caller's separate `sendKeys(["Enter"])`.
    * Cleanup unlinks the temp file in `finally`; if the buffer was loaded but the
    * paste failed (e.g. missing target), an explicit `delete-buffer` runs so no
    * buffer leaks. Unique temp + buffer names per call keep parallel `rig up`

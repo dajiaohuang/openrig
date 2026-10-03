@@ -8,7 +8,7 @@ applies-when: |
   read it before claiming a stub-agent scenario covers a behaviour.
 siblings: [arteries.md, README.md, codemap.md]
 last-verified-against-source: 1347d825
-last-updated: 2026-10-01
+last-updated: 2026-10-02
 ---
 
 # Test layers: what to run before you push, and what each layer proves
@@ -328,8 +328,17 @@ not as current status.
 > They exist, but this list is about behavioural scenarios.
 
 Status today: `queue` has partial coverage, namely create, claim and list, plus the claim
-surviving a restart. `up`, `down` and `daemon` are used by the existing scenarios but have no
-scenario of their own. Everything else has none.
+surviving a restart. `down` has partial coverage in
+`packages/test-system/scenarios/down-stops-every-seat.yaml`: after `rig down`, `rig ps` reports
+every seat stopped and the rig still listed. `send` has partial coverage in
+`send-renders-in-addressed-pane.yaml` beside it: the envelope and the message body render in
+the addressed seat's pane. `transcript` has partial coverage in
+`transcript-reads-addressed-seat.yaml`: each of two seats' scripted output is readable through
+that seat's `rig transcript --tail 200 --json`. These three run with the local runner
+(`run-scenarios.mjs`), not in the CI job. They do not prove that panes are gone or that a seat
+consumed a message. The transcript case does not establish ordering, uniqueness, sibling-token
+absence, tail limits or restart persistence. `up` and `daemon` are used by the existing
+scenarios but have no scenario of their own. Everything else has none.
 
 Before you start, two honest constraints:
 
@@ -338,6 +347,14 @@ Before you start, two honest constraints:
   the installed CLI through the existing `rigBin`, instead of one new verb per command.
 - Rows that need a seat to *answer* (anything with "nonce") depend on the input-consuming
   stub described above.
+- `expect` has no negative, absence or count form. `match` is a structural subset and
+  `contains` is a substring, so "the sibling received nothing", "the panes are gone" or "no
+  duplicates" can't be asserted yet. An exact field value, such as `runningCount: 0` on the
+  `ps` surface, is the closest available form.
+- The `restart` step runs `rig launch <rig> <node>` with no flags, and the node is the logical
+  ID (for example `dev.qa`). A stub seat has no resume token, so relaunching it after `down`
+  stops at `awaiting-decision` and asks for `--fresh`. The `launch` row needs that flag passed
+  through first.
 
 | Group | Family | Proposed first check (observable result) |
 |---|---|---|
@@ -345,7 +362,7 @@ Before you start, two honest constraints:
 | lifecycle | `daemon` | start/status/stop/restart. Port, process and persisted queue identity agree through public commands. |
 | lifecycle | `bootstrap` | Bootstrap a minimal stub spec. Seats come up ready and the selected spec is the one used. |
 | lifecycle | `up` | Launch two stub seats. Each consumes its own send. Relaunching doesn't duplicate identities. |
-| lifecycle | `down` | Tear down one rig. Its panes are gone, a sibling rig still answers, retained data follows the docs. |
+| lifecycle | `down` | (partial) Next: its panes are gone, a sibling rig still answers, retained data follows the docs. |
 | lifecycle | `create` | Create a one-seat rig through the public path. It appears and answers without a hand-written topology. |
 | lifecycle | `launch` | Fresh, relaunch, resume and fork on provider-shaped fixtures. Correct restored token, one live process. |
 | reads | `status` | Two rigs in different states. Status matches their exact identities and transitions. |
@@ -406,8 +423,8 @@ Before you start, two honest constraints:
 | integration | `ask` | Search fixture transcripts via a fake model endpoint. Citations resolve to the stored lines. |
 | integration | `file` | Copy a fixture payload through isolated transport endpoints. Verify bytes and paths. |
 | integration | `env` | A fixture service-backed rig. status/logs/down reflect that service and stop only it. |
-| delivery | `transcript` | Ordered, unique stub output. The selected seat's transcript contains no other seat's token. |
-| delivery | `send` | Send a fresh nonce and require an answer derived from it. Boot text or echo can't pass. |
+| delivery | `transcript` (partial) | Own scripted output from two addressed seats is covered by `transcript-reads-addressed-seat.yaml`. Remaining: ordering, uniqueness, no other seat's token, tail limits and restart persistence; absence/count assertions need a runner binding. |
+| delivery | `send` | (partial) Next: send a fresh nonce and require an answer derived from it. Boot text or echo can't pass. |
 | delivery | `capture` | A unique token in the pane. Wrong-seat, tail and not-found cases are told apart. |
 | delivery | `broadcast` | Broadcast a nonce to a rig or pod. Each intended seat answers once, and an excluded seat gets nothing. |
 | delivery | `walk` | Walk two pieces through an input-consuming stub. Order is kept, and a bad piece isn't reported as delivered. |

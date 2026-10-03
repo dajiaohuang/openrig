@@ -72,8 +72,10 @@ interface ClaimServiceDeps {
   // that omit them make capture a silent no-op). contextUsageStore reads the
   // Claude status-line sidecar; resumeTokenCapturer derives the Codex thread id.
   contextUsageStore?: {
-    readSidecar(sessionName: string): { ok: true; data: { session_id?: string } } | { ok: false; reason: string };
+    readSidecar(sessionName: string): { ok: true; data: { session_id?: string; sampled_at?: string } } | { ok: false; reason: string };
   };
+  /** #421 — start time of the pane's current Claude process; a sidecar sampled earlier is skipped. */
+  claudeProcessStartedAt?: ResumeTokenCaptureDeps["claudeProcessStartedAt"];
   resumeTokenCapturer?: {
     captureCodexThreadId(sessionName: string): Promise<string | undefined>;
   };
@@ -113,6 +115,7 @@ export class ClaimService {
   private transcriptStore: TranscriptStore | null;
   private claudeContextProvisioner: ClaimServiceDeps["claudeContextProvisioner"] | null;
   private contextUsageStore: ClaimServiceDeps["contextUsageStore"] | null;
+  private claudeProcessStartedAt: ClaimServiceDeps["claudeProcessStartedAt"] | null;
   private resumeTokenCapturer: ClaimServiceDeps["resumeTokenCapturer"] | null;
   private piRunnerStateStore: ClaimServiceDeps["piRunnerStateStore"] | null;
   private ompRunnerStateStore: ClaimServiceDeps["ompRunnerStateStore"] | null;
@@ -131,6 +134,7 @@ export class ClaimService {
     this.transcriptStore = deps.transcriptStore ?? null;
     this.claudeContextProvisioner = deps.claudeContextProvisioner ?? null;
     this.contextUsageStore = deps.contextUsageStore ?? null;
+    this.claudeProcessStartedAt = deps.claudeProcessStartedAt ?? null;
     this.resumeTokenCapturer = deps.resumeTokenCapturer ?? null;
     this.piRunnerStateStore = deps.piRunnerStateStore ?? null;
     this.ompRunnerStateStore = deps.ompRunnerStateStore ?? null;
@@ -192,7 +196,7 @@ export class ClaimService {
     const hint = `--- OpenRig: You have been adopted into rig "${meta.rigName}" as ${meta.logicalId}. Run: rig whoami --json ---`;
     const write = async () => {
       const sent = await this.tmuxAdapter!.sendText(tmuxSession, hint);
-      if (sent.ok) await this.tmuxAdapter!.sendKeys(tmuxSession, ["C-m"]);
+      if (sent.ok) await this.tmuxAdapter!.sendKeys(tmuxSession, ["Enter"]);
     };
     const guard = this.tmuxAdapter.deliveryGuard;
     if (guard) await guard.operation(tmuxSession, write, async target => {
@@ -239,7 +243,7 @@ export class ClaimService {
       // FR-3's adoption provenance/audit semantics are unchanged.
       const derived = await deriveResumeToken(
         { runtime: input.runtime, sessionName: input.sessionName },
-        { contextUsageStore: this.contextUsageStore, resumeTokenCapturer: this.resumeTokenCapturer, piRunnerStateStore: this.piRunnerStateStore, ompRunnerStateStore: this.ompRunnerStateStore },
+        { contextUsageStore: this.contextUsageStore, claudeProcessStartedAt: this.claudeProcessStartedAt, resumeTokenCapturer: this.resumeTokenCapturer, piRunnerStateStore: this.piRunnerStateStore, ompRunnerStateStore: this.ompRunnerStateStore },
       );
       if (derived.outcome === "exempt" || derived.outcome === "noop") return;
       const runtime = input.runtime as string; // non-null past exempt
@@ -276,7 +280,7 @@ export class ClaimService {
   private emitCaptureSkip(
     input: { rigId: string; nodeId: string; sessionId: string; sessionName: string },
     runtime: string,
-    reason: "missing_sidecar" | "parse_error" | "probe_timeout" | "invalid_token",
+    reason: "missing_sidecar" | "parse_error" | "probe_timeout" | "invalid_token" | "stale_sidecar",
   ): void {
     try {
       this.eventBus.emit({

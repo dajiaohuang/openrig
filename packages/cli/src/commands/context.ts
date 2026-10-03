@@ -466,6 +466,7 @@ Examples:
       try {
         const client = await getClient();
         const res = await client.get<ContextPackEntryWire[]>("/api/context-packs/library");
+        if (res.status !== 200) throw new Error(`Daemon returned HTTP ${res.status}`);
         const entries = res.data ?? [];
         if (opts.json) {
           console.log(JSON.stringify(entries, null, 2));
@@ -835,7 +836,14 @@ Examples:
           if (targetExists) {
             throw new Error(`A context pack named '${installName}' already exists at ${targetDir}. Remove it first or use --name to install under a different name.`);
           }
-          cpSync(source, targetDir, { recursive: true });
+          const staging = mkdtempSync(join(targetRoot, ".tmp-add-"));
+          try {
+            cpSync(source, staging, { recursive: true });
+            mkdirSync(dirname(targetDir), { recursive: true });
+            renameSync(staging, targetDir);
+          } finally {
+            rmSync(staging, { recursive: true, force: true });
+          }
         }
         // Sync the daemon library so the new pack appears immediately.
         const client = await getClient();

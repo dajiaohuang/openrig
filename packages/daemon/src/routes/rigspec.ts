@@ -12,6 +12,8 @@ import { RigSpecSchema } from "../domain/rigspec-schema.js";
 import { rigPreflight } from "../domain/rigspec-preflight.js";
 import { RigNotFoundError } from "../domain/errors.js";
 import { runSyncSite } from "../domain/sync-site-wrap.js";
+import { runtimeVersionProbeCwd } from "../adapters/preflight-exec.js";
+import { RigSpecParseError, validateRigSpecImport } from "../domain/spec-validation-service.js";
 
 export const rigspecImportRoutes = new Hono();
 
@@ -210,20 +212,12 @@ rigspecImportRoutes.post("/materialize", async (c) => {
 // POST /api/rigs/import/validate -> validate only (auto-detects format)
 rigspecImportRoutes.post("/validate", async (c) => {
   const body = await c.req.text();
-
-  let raw: unknown;
   try {
-    raw = RigSpecCodec.parse(body);
+    return c.json(validateRigSpecImport(body));
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return c.json({ valid: false, errors: [message] }, 400);
+    if (!(err instanceof RigSpecParseError)) throw err;
+    return c.json({ valid: false, errors: [err.message] }, 400);
   }
-
-  const isPodAware = raw && typeof raw === "object" && Array.isArray((raw as Record<string, unknown>).pods);
-  if (isPodAware) {
-    return c.json(RigSpecSchema.validate(raw));
-  }
-  return c.json(LegacyRigSpecSchema.validate(raw));
 });
 
 // POST /api/rigs/import/preflight -> validate + preflight (auto-detects format)
@@ -247,7 +241,7 @@ rigspecImportRoutes.post("/preflight", async (c) => {
     const fsOps = { readFile: (p: string) => fs.readFileSync(p, "utf-8"), exists: (p: string) => fs.existsSync(p) };
     const { execSync } = await import("node:child_process");
     const exec = async (cmd: string) => runSyncSite("rigspec.import.preflight", () =>
-      execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 10_000 })
+      execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 10_000, cwd: runtimeVersionProbeCwd(cmd) })
     );
     const result = await rigPreflight({
       rigSpecYaml: body,
