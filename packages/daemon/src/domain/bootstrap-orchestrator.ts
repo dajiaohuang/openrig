@@ -761,7 +761,7 @@ export class BootstrapOrchestrator {
     rigRoot: string,
     stages: BootstrapStageResult[],
     errors: string[],
-  ): Promise<((rigId: string) => Promise<{ ok: true } | { ok: false; code: string; message: string }>) | undefined> {
+  ): Promise<((rigId: string, replacedRigIds?: readonly string[]) => Promise<{ ok: true } | { ok: false; code: string; message: string }>) | undefined> {
     if (!this.deps.serviceOrchestrator || !this.deps.rigRepo) return undefined;
 
     // Parse and normalize via the canonical pod-aware codec/schema path
@@ -789,12 +789,22 @@ export class BootstrapOrchestrator {
     const rigRepo = this.deps.rigRepo;
     const services = normalizedSpec.services;
 
-    return async (rigId: string) => {
+    return async (rigId: string, replacedRigIds: readonly string[] = []) => {
       // Persist services record for the now-created rig
       const { deriveComposeProjectName } = await import("./compose-project-name.js");
       const composeFile = nodePath.resolve(rigRoot, services.composeFile);
       // Rig IDs are stable and unique; sanitizing rig names can collapse distinct names.
-      const projectName = configuredProjectName ?? deriveComposeProjectName(rigId);
+      // Only these generations were archived by this instantiation transaction.
+      const predecessorProjects = new Set(replacedRigIds.flatMap(id => {
+        const record = rigRepo.getServicesRecord(id);
+        return record ? [record.projectName] : [];
+      }));
+      if (!configuredProjectName && predecessorProjects.size > 1) {
+        return { ok: false, code: "service_boot_failed", message: "Replacement has multiple predecessor Compose projects; set services.project_name explicitly. No services were started." };
+      }
+      const inheritedProject = predecessorProjects.values().next().value as string | undefined;
+      const projectName = configuredProjectName ?? inheritedProject ?? deriveComposeProjectName(rigId);
+      const preservesPredecessor = predecessorProjects.has(projectName);
       const persistedServices = { ...services, projectName };
 
       rigRepo.setServicesRecord(rigId, {
@@ -820,11 +830,12 @@ export class BootstrapOrchestrator {
         // PodRigInstantiator will delete the rig record next, which cascades
         // away rig_services and the normal teardown handle — so any
         // already-started compose containers would orphan. Tear them down
-        // here best-effort while the rig handle still exists. Teardown
+        // here best-effort while the rig handle still exists, except when
+        // reusing a predecessor project that must survive rollback. Teardown
         // errors are swallowed so they cannot mask the boot failure that
         // is the load-bearing return.
         try {
-          await serviceOrch.teardown(rigId);
+          if (!preservesPredecessor) await serviceOrch.teardown(rigId);
         } catch {
           // Best-effort. If teardown also fails, the boot-failure error
           // is what the operator needs; manual `docker compose down`

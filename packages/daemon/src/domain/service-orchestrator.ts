@@ -142,6 +142,9 @@ export class ServiceOrchestrator {
     if (!record) {
       return { ok: true }; // No services — nothing to tear down
     }
+    if (this.rigRepo.hasOtherLiveServicesProject(rigId, record.projectName)) {
+      return { ok: true };
+    }
 
     const spec = this.parseSpec(record);
     const policy = opts?.policyOverride ?? spec?.downPolicy ?? "down";

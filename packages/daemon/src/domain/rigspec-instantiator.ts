@@ -1229,7 +1229,7 @@ export class PodRigInstantiator {
     return { ok: true, rigId, nodeId, logicalId: node.logicalId, status: "launched", sessionName: result.sessionName, warnings: result.warnings };
   }
 
-  async instantiate(rigSpecYaml: string, rigRoot: string, opts?: { cwdOverride?: string; force?: boolean; prelaunchHook?: (rigId: string) => Promise<{ ok: true } | { ok: false; code: string; message: string }> }): Promise<InstantiateOutcome> {
+  async instantiate(rigSpecYaml: string, rigRoot: string, opts?: { cwdOverride?: string; force?: boolean; prelaunchHook?: (rigId: string, replacedRigIds: readonly string[]) => Promise<{ ok: true } | { ok: false; code: string; message: string }> }): Promise<InstantiateOutcome> {
     // #141: while an import may archive a stopped same-name generation, allow one import per rig name at
     // a time on this daemon. Otherwise two imports could each replace it, or one could archive the other's
     // in-progress replacement. Unrelated names are unaffected; an adapter that cannot probe keeps today's
@@ -1255,7 +1255,7 @@ export class PodRigInstantiator {
     }
   }
 
-  private async instantiateOnce(rigSpecYaml: string, rigRoot: string, opts?: { cwdOverride?: string; force?: boolean; prelaunchHook?: (rigId: string) => Promise<{ ok: true } | { ok: false; code: string; message: string }> }): Promise<InstantiateOutcome> {
+  private async instantiateOnce(rigSpecYaml: string, rigRoot: string, opts?: { cwdOverride?: string; force?: boolean; prelaunchHook?: (rigId: string, replacedRigIds: readonly string[]) => Promise<{ ok: true } | { ok: false; code: string; message: string }> }): Promise<InstantiateOutcome> {
     // 1. Parse + validate
     let rigSpec: PodRigSpec;
     try {
@@ -1438,7 +1438,7 @@ export class PodRigInstantiator {
     // the spec name is left free for a clean retry. Pods rely on rigs
     // via ON DELETE CASCADE so deleting the rig is sufficient.
     if (opts?.prelaunchHook) {
-      const hookResult = await opts.prelaunchHook(rigId);
+      const hookResult = await opts.prelaunchHook(rigId, archivedGenerations);
       if (!hookResult.ok) {
         this.deps.rigRepo.deleteRig(rigId);
         restoreArchived();

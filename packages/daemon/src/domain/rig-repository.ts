@@ -632,6 +632,15 @@ export class RigRepository {
     return this.rowToServicesRecord(stored);
   }
 
+  /** A retained generation must not tear down a live generation's project. */
+  hasOtherLiveServicesProject(rigId: string, projectName: string): boolean {
+    const live = this.hasRigColumn("archived_at") ? " AND r.archived_at IS NULL" : "";
+    return Boolean(this.db.prepare(`
+      SELECT 1 FROM rig_services s JOIN rigs r ON r.id = s.rig_id
+      WHERE s.project_name = ? AND s.rig_id != ?${live} LIMIT 1
+    `).get(projectName, rigId));
+  }
+
   getServicesRecord(rigId: string): RigServicesRecord | null {
     const row = this.db.prepare("SELECT * FROM rig_services WHERE rig_id = ?").get(rigId) as RigServicesRow | undefined;
     return row ? this.rowToServicesRecord(row) : null;
