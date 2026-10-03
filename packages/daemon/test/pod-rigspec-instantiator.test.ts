@@ -1004,16 +1004,16 @@ profiles:
   // failure). Unlike cycle_error, the rig record + pods have been created
   // by the time the hook runs (the hook needs rigId), so the fix wraps
   // the failure return with rigRepo.deleteRig(rigId).
-  it("service_boot_failed: rolls back the created rig record (Bug 2 prelaunch-hook rollback)", async () => {
+  it.each(["service_boot_failed", "compose_project_conflict"])("%s: propagates hook refusal and rolls back the created rig record", async (code) => {
     const { db, rigRepo, inst } = setup();
     const specName = "orphan-prelaunch-test-rig";
     const yaml = RigSpecCodec.serialize(makeRigSpec({ name: specName }));
     const result = await inst.instantiate(yaml, RIG_ROOT, {
-      prelaunchHook: async () => ({ ok: false, code: "service_boot_failed", message: "test: service boot refused" }),
+      prelaunchHook: async () => ({ ok: false, code, message: "test: service boot refused" }),
     });
     expect(result.ok).toBe(false);
     if (!result.ok && "code" in result) {
-      expect(result.code).toBe("service_boot_failed");
+      expect(result.code).toBe(code);
     }
     const orphans = rigRepo.findRigsByName(specName);
     expect(orphans, `expected no orphan rig records after service_boot_failed, found ${JSON.stringify(orphans)}`).toHaveLength(0);

@@ -1442,7 +1442,7 @@ export class PodRigInstantiator {
       if (!hookResult.ok) {
         this.deps.rigRepo.deleteRig(rigId);
         restoreArchived();
-        return { ok: false, code: "service_boot_failed", message: hookResult.message };
+        return { ok: false, code: hookResult.code === "compose_project_conflict" ? "compose_project_conflict" : "service_boot_failed", message: hookResult.message };
       }
     }
 

@@ -6,7 +6,7 @@ import { createFullTestDb } from "./helpers/test-app.js";
 import { ServiceOrchestrator } from "../src/domain/service-orchestrator.js";
 import { ComposeServicesAdapter } from "../src/adapters/compose-services-adapter.js";
 
-type PrelaunchHook = (rigId: string, replacedRigIds?: readonly string[]) => Promise<{ ok: boolean }>;
+type PrelaunchHook = (rigId: string, replacedRigIds?: readonly string[]) => Promise<{ ok: boolean; code?: string; message?: string }>;
 type ServiceHookAccess = {
   buildServicePrelaunchHook(
     yaml: string, root: string, stages: unknown[], errors: string[],
@@ -69,6 +69,13 @@ edges: []
       const result = await hook!(current.id, replaced);
       expect(result.ok).toBe(scenario !== "failure" && scenario !== "ambiguous");
       if (scenario === "ambiguous") {
+        expect(result.code).toBe("compose_project_conflict");
+        for (const id of replaced) {
+          expect(result.message).toContain(`${id}: ${rigRepo.getServicesRecord(id)!.projectName}`);
+        }
+        expect(result.message).toContain("Set services.project_name in the rig spec YAML");
+        expect(result.message).toContain("re-run the same command");
+        expect(result.message).toContain("No services were started");
         expect(commands).toEqual([]);
         expect(rigRepo.getServicesRecord(current.id)).toBeNull();
       } else {
@@ -79,7 +86,8 @@ edges: []
         if (scenario === "success") {
           // Even explicit volume cleanup on the archived generation cannot destroy the live project.
           commands.length = 0;
-          await serviceOrchestrator.teardown(predecessor.id, { policyOverride: "down_and_volumes" });
+          const teardown = await serviceOrchestrator.teardown(predecessor.id, { policyOverride: "down_and_volumes" });
+          expect(teardown).toEqual({ ok: true, kept: `kept project legacy-project: still used by rig demo-rig (${current.id})` });
           expect(commands).toEqual([]);
           await serviceOrchestrator.teardown(current.id);
           expect(commands.some(cmd => cmd.includes("-p 'legacy-project'") && cmd.includes("down"))).toBe(true);
@@ -88,6 +96,32 @@ edges: []
     } finally {
       db.close();
     }
+  });
+
+  it.each(["unrelated", "unarchived"])("tears down both live owners sharing an explicit project (%s)", async (scenario) => {
+    const db = createFullTestDb();
+    try {
+      const rigRepo = new RigRepository(db);
+      const commands: string[] = [];
+      const adapter = new ComposeServicesAdapter(async cmd => { commands.push(cmd); return ""; });
+      const orchestrator = new ServiceOrchestrator({ rigRepo, composeAdapter: adapter });
+      const first = rigRepo.createRig("first");
+      if (scenario === "unarchived") rigRepo.archiveRig(first.id);
+      const second = rigRepo.createRig(scenario === "unarchived" ? "first" : "second");
+      if (scenario === "unarchived") rigRepo.unarchiveRig(first.id);
+      for (const rig of [first, second]) {
+        rigRepo.setServicesRecord(rig.id, {
+          kind: "compose", specJson: JSON.stringify({ kind: "compose", composeFile: "compose.yaml", projectName: "shared" }),
+          rigRoot: process.cwd(), composeFile: "compose.yaml", projectName: "shared", latestReceiptJson: "{}",
+        });
+      }
+      for (const rig of [first, second]) {
+        expect(await orchestrator.teardown(rig.id)).toEqual({ ok: true });
+        expect(rigRepo.getServicesRecord(rig.id)!.latestReceiptJson).toBeNull();
+      }
+      expect(commands).toHaveLength(2);
+      expect(commands.every(cmd => cmd.includes("-p 'shared'") && cmd.includes("down"))).toBe(true);
+    } finally { db.close(); }
   });
 
   it.each([undefined, "explicit-project"])("persists the actual project in both record and spec (%s)", async (explicit) => {

@@ -795,12 +795,14 @@ export class BootstrapOrchestrator {
       const composeFile = nodePath.resolve(rigRoot, services.composeFile);
       // Rig IDs are stable and unique; sanitizing rig names can collapse distinct names.
       // Only these generations were archived by this instantiation transaction.
-      const predecessorProjects = new Set(replacedRigIds.flatMap(id => {
+      const predecessors = replacedRigIds.flatMap(id => {
         const record = rigRepo.getServicesRecord(id);
-        return record ? [record.projectName] : [];
-      }));
+        return record ? [{ id, projectName: record.projectName }] : [];
+      });
+      const predecessorProjects = new Set(predecessors.map(record => record.projectName));
       if (!configuredProjectName && predecessorProjects.size > 1) {
-        return { ok: false, code: "service_boot_failed", message: "Replacement has multiple predecessor Compose projects; set services.project_name explicitly. No services were started." };
+        const conflicts = predecessors.map(record => `${record.id}: ${record.projectName}`).join("; ");
+        return { ok: false, code: "compose_project_conflict", message: `Replacement has multiple predecessor Compose projects (${conflicts}). Set services.project_name in the rig spec YAML to the project you intend to use, then re-run the same command. No services were started.` };
       }
       const inheritedProject = predecessorProjects.values().next().value as string | undefined;
       const projectName = configuredProjectName ?? inheritedProject ?? deriveComposeProjectName(rigId);

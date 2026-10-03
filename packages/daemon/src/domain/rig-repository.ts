@@ -633,12 +633,16 @@ export class RigRepository {
   }
 
   /** A retained generation must not tear down a live generation's project. */
-  hasOtherLiveServicesProject(rigId: string, projectName: string): boolean {
-    const live = this.hasRigColumn("archived_at") ? " AND r.archived_at IS NULL" : "";
-    return Boolean(this.db.prepare(`
-      SELECT 1 FROM rig_services s JOIN rigs r ON r.id = s.rig_id
-      WHERE s.project_name = ? AND s.rig_id != ?${live} LIMIT 1
-    `).get(projectName, rigId));
+  getLiveServicesSuccessor(rigId: string, projectName: string): { id: string; name: string } | null {
+    if (!this.hasRigColumn("archived_at")) return null;
+    return this.db.prepare(`
+      SELECT r.id, r.name FROM rig_services s JOIN rigs r ON r.id = s.rig_id
+      JOIN rigs predecessor ON predecessor.id = ?
+      WHERE s.project_name = ? AND r.id != predecessor.id
+        AND predecessor.archived_at IS NOT NULL AND r.archived_at IS NULL
+        AND r.name = predecessor.name AND r.created_at >= predecessor.created_at
+      ORDER BY r.created_at DESC LIMIT 1
+    `).get(rigId, projectName) as { id: string; name: string } | undefined ?? null;
   }
 
   getServicesRecord(rigId: string): RigServicesRecord | null {

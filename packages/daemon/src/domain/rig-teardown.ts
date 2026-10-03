@@ -91,7 +91,10 @@ export class RigTeardownOrchestrator {
       result.alreadyStopped = true;
       // Still tear down services even if no agent sessions are running
       if (this.deps.serviceOrchestrator) {
-        try { await this.deps.serviceOrchestrator.teardown(rigId); } catch { /* best-effort */ }
+        try {
+          const services = await this.deps.serviceOrchestrator.teardown(rigId);
+          if (services.ok && services.kept) result.errors.push(services.kept);
+        } catch { /* best-effort */ }
       }
       // Skip to delete if requested
       if (opts?.delete) {
@@ -140,7 +143,8 @@ export class RigTeardownOrchestrator {
     // 5b. Tear down services if they exist
     if (this.deps.serviceOrchestrator) {
       try {
-        await this.deps.serviceOrchestrator.teardown(rigId);
+        const services = await this.deps.serviceOrchestrator.teardown(rigId);
+        if (services.ok && services.kept) result.errors.push(services.kept);
       } catch (err) {
         result.errors.push(`Service teardown warning: ${(err as Error).message}`);
         // Best-effort — rig teardown continues
