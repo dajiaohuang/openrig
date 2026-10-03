@@ -551,13 +551,16 @@ continuity_policy:
 
 ## Validation Rules Summary
 
-These rules are enforced by the validator. A spec that violates any of these will be rejected by `rig spec validate` and `rig up`.
+Schema validation checks the structural rules below. Pod and member IDs containing
+`@` are additionally rejected during preflight and member creation or launch; a
+spec can pass `rig spec validate` and then fail at preflight or import. Run
+`rig spec preflight` before creation or import.
 
 1. `version` and `name` are required non-empty strings.
 2. `pods` must be a non-empty array.
-3. Pod IDs must not contain dots or `@` and must be unique.
+3. Pod IDs must not contain dots and must be unique.
 4. Pod labels are required.
-5. Member IDs must not contain dots or `@` and must be unique within their pod.
+5. Member IDs must not contain dots and must be unique within their pod.
 6. `agent_ref`, `profile`, `runtime`, and `cwd` are required for every member.
 7. Terminal nodes require the exact triple: `runtime: terminal`, `agent_ref: builtin:terminal`, `profile: none`.
 8. `agent_ref` must start with `local:` (relative) or `path:` (absolute), except `builtin:terminal`.
