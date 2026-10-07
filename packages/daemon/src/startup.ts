@@ -492,7 +492,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // An injected string exec keeps the shell path, so its fake sees every command. OPENRIG_TMUX_SHELL=1 keeps it too.
   const argvExec = opts?.argvExec
     ?? (opts?.tmuxExec || (process.env.OPENRIG_TMUX_SHELL === "1" && process.platform !== "win32") ? undefined : execArgvCommand);
-  const tmuxAdapter = new TmuxAdapter(opts?.tmuxExec ?? execCommand, undefined, argvExec);
+  const tmuxAdapter = new TmuxAdapter(opts?.tmuxExec ?? execCommand, undefined, argvExec,
+    process.platform === "win32" && !opts?.tmuxExec ? "psmux" : "tmux");
   // The real tmux runs with this process's environment, so its server is the one $TMUX names.
   // An injected exec has no server of its own: printed attach commands stay in the default form.
   setDaemonTmuxServer(opts?.tmuxExec ? [] : tmuxServerArgs(process.env));
@@ -621,7 +622,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     },
   });
   const { SeatLaunchEnvironment } = await import("./domain/seat-launch-environment.js");
-  const seatLaunchEnvironment = new SeatLaunchEnvironment(tmuxAdapter, launchSessionEnv, process.cwd(), undefined, configuredCodexHome);
+  const seatLaunchEnvironment = new SeatLaunchEnvironment(tmuxAdapter, launchSessionEnv, process.cwd(), undefined, configuredCodexHome,
+    process.platform === "win32" ? "win32" : "posix");
   const nodeLauncher = new NodeLauncher({
     db,
     rigRepo,
