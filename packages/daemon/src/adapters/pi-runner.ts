@@ -28,6 +28,7 @@ import { pathToFileURL } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { formatDaemonHostForUrl } from "./daemon-url.js";
 import { piCredentialNotice } from "./pi-readiness.js";
+import { resolveWindowsPiCommand } from "./windows-pi-command.js";
 import {
   piSeatPaths, buildPiChildArgs, buildPiChildEnv, buildPendingRunnerState, parsePiRunnerState,
   PI_RUNNER_READY_MARKER, PI_RUNNER_EXIT_MARKER, PI_RUNNER_ERROR_MARKER, PI_PROVIDER_ENV_VARS,
@@ -863,7 +864,24 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     command = resolved.path;
   }
 
-  const child = spawn(command, childArgs, {
+  let prefix: string[] = [];
+  if (runtime === "pi" && process.platform === "win32") {
+    try {
+      const resolved = resolveWindowsPiCommand(process.env.PATH ?? "", process.execPath);
+      command = resolved.command;
+      prefix = resolved.prefix;
+    } catch {
+      console.error("[pi-runner] ERROR Windows Pi requires a native executable or a recognized @earendil-works npm installation on the runner PATH.");
+      const at = new Date().toISOString();
+        let prior: PiRunnerState | null = null;
+        try { prior = parsePiRunnerState(fs.readFileSync(paths.runnerStatePath, "utf8")); } catch { /* unavailable cursor */ }
+        fs.writeFileSync(paths.runnerStatePath, JSON.stringify({ ready: false, launchId: args.launchId, updatedAt: at,
+          ...(prior?.lastEntryId ? { lastEntryId: prior.lastEntryId } : {}), exited: { code: 127, at } }));
+      process.exitCode = 127;
+      return;
+    }
+  }
+  const child = spawn(command, [...prefix, ...childArgs], {
     cwd: args.cwd,
     env: childEnv,
     stdio: ["pipe", "pipe", "pipe"],

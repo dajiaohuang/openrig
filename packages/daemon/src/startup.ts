@@ -479,7 +479,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
 
   const argvExec = opts?.argvExec
     ?? (opts?.tmuxExec ? undefined : process.platform === "win32" ? execArgvCommand : undefined);
-  const tmuxAdapter = new TmuxAdapter(opts?.tmuxExec ?? execCommand, undefined, argvExec);
+  const tmuxAdapter = new TmuxAdapter(opts?.tmuxExec ?? execCommand, undefined, argvExec,
+    process.platform === "win32" && !opts?.tmuxExec ? "psmux" : "tmux");
   const deliveryGuard = new SeatDeliveryGuard(db, target => resolveGuardTarget(db, target));
   deliveryGuard.recoverActivation();
   tmuxAdapter.deliveryGuard = deliveryGuard;
@@ -595,7 +596,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     },
   });
   const { SeatLaunchEnvironment } = await import("./domain/seat-launch-environment.js");
-  const seatLaunchEnvironment = new SeatLaunchEnvironment(tmuxAdapter, launchSessionEnv, process.cwd(), undefined, configuredCodexHome);
+  const seatLaunchEnvironment = new SeatLaunchEnvironment(tmuxAdapter, launchSessionEnv, process.cwd(), undefined, configuredCodexHome,
+    process.platform === "win32" ? "win32" : "posix");
   const nodeLauncher = new NodeLauncher({
     db,
     rigRepo,
