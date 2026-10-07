@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import fs from "node:fs";
 import { randomUUID } from "node:crypto";
+import { requestWindowsDaemonStop } from "@openrig/daemon/daemon-shutdown";
 import { acquireDaemonStartLock } from "../daemon-start-lock.js";
 import { formatDaemonHostForUrl } from "../client.js";
 import { execFileSync, spawn } from "node:child_process";
@@ -90,6 +91,7 @@ export function realDeps(): LifecycleDeps {
   });
 
   return {
+    requestStop: process.platform === "win32" ? state => requestWindowsDaemonStop(OPENRIG_DIR, state) : undefined,
     processLiveness,
     acquireStartLock: () => acquireDaemonStartLock(OPENRIG_DIR),
     spawn: (cmd, args, opts) => spawn(cmd, args, opts as Parameters<typeof spawn>[2]),
