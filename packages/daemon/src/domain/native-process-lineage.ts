@@ -5,6 +5,7 @@ import { isShellForeground } from "./shell-classifier.js";
 import { runAsyncSite } from "./sync-site-wrap.js";
 import { readNativeExecutablePaths } from "./native-process-executable.js";
 import { readProcessTable } from "./process-table.js";
+import { parseWindowsCommandLine } from "../adapters/windows-argv.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -566,10 +567,12 @@ function candidatesMatching(rows: NativeProcessRow[], panePid: number, runtime: 
     // A unique native child rooted in this pane is the Windows occupancy proof.
     // Creation ordering rejects a recycled parent PID; no foreground PGID is invented.
     const matches: NativeProcessObservation[] = [];
+    const expectedName = runtime === "claude-code" ? "claude" : "codex";
     for (const row of rows) {
-      if (runtime !== "codex" || row.platform !== "win32" || executableName(row.executableName ?? "") !== "codex"
-        || !row.executablePath || executableName(row.executablePath) !== "codex"
-        || (tokens(row.command)[0] ?? "").replace(/\//g, "\\").toLowerCase() !== row.executablePath.replace(/\//g, "\\").toLowerCase()) continue;
+      if (row.platform !== "win32" || executableName(row.executableName ?? "") !== expectedName
+        || !row.executablePath || executableName(row.executablePath) !== expectedName
+        || (selectedExecutable && row.executablePath.replace(/\//g, "\\").toLowerCase() !== selectedExecutable.replace(/\//g, "\\").toLowerCase())
+        || (parseWindowsCommandLine(row.command)[0] ?? "").replace(/\//g, "\\").toLowerCase() !== row.executablePath.replace(/\//g, "\\").toLowerCase()) continue;
       const chain: NativeProcessRow[] = [];
       const visited = new Set<number>();
       let current: NativeProcessRow | undefined = row;
@@ -612,16 +615,18 @@ function selectNativeProcess(rows: NativeProcessRow[], panePid: number, expected
   if (!chain || chain.length === 0 || (runtime !== "codex" && chain.length !== 1)) return null;
   const observation = chain[0]!;
   const { process } = observation;
+  const argv = process.platform === "win32" ? parseWindowsCommandLine(process.command) : tokens(process.command);
   if (runtime === "claude-code") {
     if (!expectedToken) return null;
-    const launched = claudeSessionToken(tokens(process.command).slice(1));
+    const launched = claudeSessionToken(argv.slice(1));
     if (launched !== expectedToken && !(launched === rotation?.token && rotationProcess(process, rotation))) return null;
   } else {
     // Every link that names a conversation must name the expected one, and
     // links naming different conversations stay refused. Exact resume proof
     // needs the deepest process's own argv: a launcher's token is never
     // inherited by a child that names nothing, which stays deliverable but unproved.
-    const identities = chain.map((link) => codexConversationToken(tokens(link.process.command).slice(1), "resume"));
+    const identities = chain.map((link) => codexConversationToken((link.process.platform === "win32"
+      ? parseWindowsCommandLine(link.process.command) : tokens(link.process.command)).slice(1), "resume"));
     if (new Set(identities.filter((value) => typeof value === "string")).size > 1) return null;
     if (requireResume && (!expectedToken || identities[0] !== expectedToken)) return null;
     if (expectedToken !== undefined && identities.some((value) => value !== undefined
@@ -713,7 +718,7 @@ async function observeNativePaneProcess(input: {
     const rows = await (input.listProcesses ?? (() => listNativeProcesses({ claudeLaunchPaths: input.scriptLaunch === true })))();
     if (rows.find(row => row.pid === pid)?.platform === "win32") {
       const foreground = executableName(await input.tmux.getPaneCommand?.(input.target) ?? "");
-      if (runtime !== "codex" || !["codex", "codex-code-mode-host"].includes(foreground)) return null;
+      if (!(runtime === "claude-code" ? ["claude"] : ["codex", "codex-code-mode-host"]).includes(foreground)) return null;
     }
     return selectNativeProcess(rows, pid, input.expectedToken, input.requireResume, runtime, input.selectedExecutable,
       runtime === "claude-code" ? input.rotation : undefined, input.scriptLaunch);
