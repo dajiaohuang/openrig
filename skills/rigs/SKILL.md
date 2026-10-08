@@ -1,6 +1,6 @@
 ---
 name: rigs
-description: Use when the user types /rigs, or asks to install OpenRig, to join this session to an OpenRig team, or to work with a team of Claude Code or Codex agents from here.
+description: Use when the user mentions OpenRig, rigs or the rig command, or wants a team of coding agents (Claude Code, Codex) on their project. That includes installing, setting up, starting or updating OpenRig, seeing or getting back to their OpenRig agents, TUI or operator, starting or sharing a team, and joining this session to one.
 ---
 
 # rigs: your route into OpenRig
@@ -36,15 +36,59 @@ guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say s
 - **Start OpenRig:** `rig daemon status`, and `rig daemon start` if it isn't running. `rig preflight` and `rig doctor`
   don't start it. Starting it also starts OpenRig's own team, the kernel, whose operator sets up the person's team.
   Keep it.
-- **Offer the OpenRig view:** ask "Open the OpenRig view now?" On yes, open it in a new terminal space, never the one
-  in use: `rig terminal open saved:kernel` (herdr), `--provider cmux`, or a plain terminal window. On no, or with no
-  display (SSH), give the command to open it later; that's a valid outcome. "Open the kernel conversations" in
-  `rig context get reference/getting-started.md` covers each case.
+- **Show them OpenRig, the handoff:** once OpenRig is running, open the OpenRig TUI and operator for the person. Say
+  you're opening it, then run `rig terminal open saved:kernel --window` on the daemon's desktop. This is the next step
+  after installing or starting OpenRig, and the way back whenever they want their agents or OpenRig again. Don't wait
+  to be asked or for particular words. If they've said not now, give them that command for later. It opens a view
+  itself, using herdr when installed or plain tmux otherwise:
+  - **Inside Herdr** (you run in a Herdr pane): it switches the person's Herdr to an `openrig kernel` space, reusing a live
+    one. No new window and no macOS prompt; their own spaces stay in the sidebar.
+  - **In Terminal or Ghostty:** a new tab or window the size of theirs.
+  - **From Claude Desktop, iTerm or VS Code on a Mac:** a new Ghostty window when supported, otherwise Terminal. Only
+    here, tell the person before running it that **Allow is fine** if macOS asks to control that app.
+    `echo $TERM_PROGRAM $__CFBundleIdentifier` tells you where you run. `herdr`, `Apple_Terminal` or `ghostty`, or
+    `tmux` with `com.apple.Terminal` or `com.mitchellh.ghostty`, mean no macOS prompt, so don't mention one. `tmux`
+    with anything else (iTerm, VS Code) can prompt, so say Allow is fine first.
+  - **Layout:** under 120 columns the operator fills the first page; from 120, the dashboard and operator share it. The
+    advisor has its own tab or tmux window.
+
+  Then tell the person in a sentence or two where it opened and that the operator is ready for what they want to
+  build. Don't list agents or statuses (the TUI shows them), and don't suggest a command for them to type.
+  Preserve the current terminal. If OpenRig's notes say it couldn't confirm the view, say so plainly. If it's already
+  open, point them to it rather than opening another. Only if the window cannot open, `rig tui --shared` is the
+  dashboard-only fallback; explain the failure and help with the chosen fallback. Herdr is visible only in a terminal
+  the person can see; switching the shared TUI to `:terminals` does not open one. No and headless/SSH use are valid
+  background outcomes. Provider-only `--provider herdr` or `--provider cmux` is for an existing provider workspace,
+  not the first desktop window.
+- **If the window can't open, or over headless SSH:** say plainly that no visible terminal was opened, and ask the
+  person to open a new terminal window or tab on the daemon's host. Over SSH, that's a new SSH session to it with the
+  known account. If you only know an HTTP daemon address, ask for the SSH details rather than inventing them. Then
+  give them one complete command:
+  - **The command OpenRig printed:** when `rig terminal open saved:kernel --window` can't open a window, it says why
+    and ends with `run:` and a command (the `error` field with `--json`). That command already names the installed
+    herdr binary and the daemon's socket, or the conversation to attach. Relay it exactly rather than composing one.
+    If a note asks you to place the view once Herdr starts, run that `rig terminal open` yourself after they start it.
+  - **If it printed no command:** find `operator.agent` in `rig ps --nodes --rig kernel --json`, take its
+    `canonicalSessionName` (never a guessed name) and give
+    `env -u TMUX tmux attach-session -t '=<canonicalSessionName>'` for the operator's conversation.
+
+  For any other failure, the table under "What can interrupt installation and the OpenRig view" in
+  `rig context get reference/getting-started.md#open-the-kernel-conversations` says why and what to do next.
 - **Give the operator the goal:** ask what they want worked on, in which repository and on which branch, unless they've
-  said. Then follow "Installing-agent handoff" in the same guide: find the `operator.agent` row in
-  `rig ps --nodes --rig kernel --json` and `rig send` its `canonicalSessionName` (never a guessed name) the goal,
-  folder and branch. The operator helps them pick a team that fits their logins, starts it on their yes and gives the
-  goal to the team's lead. Show them where the operator answers, and don't build the project yourself.
+  said. Find the `operator.agent` row in `rig ps --nodes --rig kernel --json`, take its `canonicalSessionName`
+  (never the logical ID or a guessed name) and send:
+  `rig send <canonicalSessionName> 'This is the agent that installed OpenRig. The person will answer in your pane. Goal: <goal>. Project folder: <absolute path>. Branch: <branch>.'`
+  Or the person types the goal and folder in the operator's pane. If they give you a goal later, forward it the same
+  way. The operator helps them pick a team that fits their logins, starts it on their yes and gives the goal to the
+  team's lead. Show them where the operator answers, and don't build the project yourself.
+- **Relay the operator's questions:** the operator asks in its own pane, and the person may not be looking there.
+  After each step you hand it, read its screen with `rig capture <canonicalSessionName>`. When it asks the person
+  something (start this team? which folder? which option?), ask them here in the operator's words and send their
+  answer back with `rig send`, or tell them to answer in the operator's pane. Unlike a prompt or a menu, a question
+  doesn't show up as a stopped seat, so don't leave it to a background wait.
+- **Installation is finished** when the operator is ready and the person is talking to it; a healthy daemon alone isn't
+  that. If they'd rather talk later, keep that choice, leave them the exact connection step and say the handoff to the
+  operator is still pending.
 - **See what's running:** `rig ps`, then `rig ps --nodes --rig <rig>` for a team's agents. If a team is already
   running in that repository, tell the operator.
 - **Check it's ready before you say so:** `rig ps --nodes --rig <rig>`. If an agent is stopped at a prompt or a menu,
@@ -86,4 +130,4 @@ guidance in `AGENTS.md` or `CLAUDE.md` plus the team's skills and plugins. Say s
 - **Everything in the library:** `rig context list`.
 - **Exact syntax:** `rig <command> --help` is always current for the installed version.
 
-Written for OpenRig 0.6.6. When something here and `--help` disagree, `--help` wins.
+Written for OpenRig 0.6.7. When something here and `--help` disagree, `--help` wins.
