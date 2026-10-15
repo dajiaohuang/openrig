@@ -4,6 +4,7 @@ import {
   assessNativeResumeProbe,
   buildNativeResumeCommand,
   buildCodexResumeCore,
+  buildTraecliResumeCore,
   isProbeShellReady,
 } from "../src/domain/native-resume-probe.js";
 
@@ -220,6 +221,12 @@ describe("native resume probe", () => {
     );
   });
 
+  it("builds a TraeCLI resume command with the explicit workspace-write floor", () => {
+    expect(buildNativeResumeCommand("traecli", "019d-token")).toBe(
+      "traecli --no-daemon -s workspace-write -a on-request --no-alt-screen --resume '019d-token'"
+    );
+  });
+
   it("returns null when runtime or token are missing", () => {
     expect(buildNativeResumeCommand("terminal", "x")).toBeNull();
     expect(buildNativeResumeCommand("claude-code", null)).toBeNull();
@@ -261,6 +268,40 @@ describe("native resume probe", () => {
         "codex -s workspace-write -m 'gpt-5.4-cheap' -c 'model_reasoning_effort=\"high\"' resume 'tok-123'"
       );
     });
+  });
+
+  describe("buildTraecliResumeCore (shared builder)", () => {
+    it("emits floor posture, no alternate screen, resume token, and optional model", () => {
+      expect(buildTraecliResumeCore("tok-123", false, undefined, "gpt-5.5")).toBe(
+        "traecli --no-daemon -s workspace-write -a on-request --no-alt-screen --resume 'tok-123' -m 'gpt-5.5'"
+      );
+    });
+
+    it("useLast emits --last instead of token", () => {
+      expect(buildTraecliResumeCore("", true)).toBe(
+        "traecli --no-daemon -s workspace-write -a on-request --no-alt-screen --resume --last"
+      );
+    });
+  });
+
+  it("classifies an active TraeCLI TUI as resumed", () => {
+    expect(
+      assessNativeResumeProbe({
+        runtime: "traecli",
+        paneCommand: "traecli",
+        paneContent: "Trae CLI\n> ",
+      })
+    ).toMatchObject({ status: "resumed", code: "active_runtime" });
+  });
+
+  it("classifies TraeCLI auth prompts as attention required", () => {
+    expect(
+      assessNativeResumeProbe({
+        runtime: "traecli",
+        paneCommand: "traecli",
+        paneContent: "login required before continuing",
+      })
+    ).toMatchObject({ status: "attention_required", code: "traecli_auth_required" });
   });
 
   it("classifies Claude no-conversation output as failed", () => {

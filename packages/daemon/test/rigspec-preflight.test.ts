@@ -459,6 +459,22 @@ profiles:
     expect(result.errors).toEqual([]);
   });
 
+  it("accepts a modern pod member with runtime: traecli + resolvable agent_ref", async () => {
+    const files: Record<string, string> = {
+      [`${RIG_ROOT}/agents/impl/agent.yaml`]: validAgentYaml("impl"),
+    };
+    const rigYaml = makeRigYaml({
+      pods: [{
+        id: "dev", label: "Dev",
+        members: [{ id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "traecli", cwd: "." }],
+        edges: [],
+      }],
+    });
+    const result = await rigPreflight({ rigSpecYaml: rigYaml, rigRoot: RIG_ROOT, fsOps: mockFs(files) });
+    expect(result.ready, `preflight must accept runtime: traecli; errors: ${JSON.stringify(result.errors)}`).toBe(true);
+    expect(result.errors).toEqual([]);
+  });
+
   // T7: missing cwd
   it("reports missing cwd", async () => {
     const files: Record<string, string> = {

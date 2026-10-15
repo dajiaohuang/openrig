@@ -4,7 +4,7 @@
 // additive evolution only after schema lock. BR-6: accountId/profileRef are opaque refs,
 // NEVER a token/header/auth-file content.
 
-export type ProviderKind = "codex" | "claude";
+export type ProviderKind = "codex" | "claude" | "traecli";
 export type AccountAuthState = "active" | "needs_reauth" | "unknown";
 
 /** accounts[] — one row per known provider account. */

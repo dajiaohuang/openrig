@@ -1,5 +1,5 @@
 import { shellQuote } from "../adapters/shell-quote.js";
-import { codexPostureArg } from "../adapters/yolo-mode.js";
+import { codexPostureArg, traecliPostureArg } from "../adapters/yolo-mode.js";
 
 // L3 adds `attention_required` for the Claude resume-selection prompt proxy.
 // Distinct from `inconclusive` (we don't know yet) and `failed` (terminal
@@ -43,6 +43,9 @@ export function buildNativeResumeCommand(
   if (runtime === "codex") {
     return buildCodexResumeCore(resumeToken, codexConfigProfile);
   }
+  if (runtime === "traecli") {
+    return buildTraecliResumeCore(resumeToken);
+  }
   return null;
 }
 
@@ -79,6 +82,19 @@ export function buildCodexResumeCore(
   const tokenArg = useLast ? "--last" : shellQuote(resumeToken);
   const daemonArg = daemonOptOut ? " --no-daemon" : "";
   return `codex${daemonArg}${profileOrPosture}${modelArg}${effortArg} resume ${middle}${tokenArg}`;
+}
+
+export function buildTraecliResumeCore(
+  resumeToken: string,
+  useLast?: boolean,
+  resolvedPosture?: "floor" | "full_bypass" | "auto",
+  model?: string | null,
+  precomputedPostureArg?: string,
+): string {
+  const postureArg = precomputedPostureArg ?? traecliPostureArg(process.env, resolvedPosture);
+  const modelArg = model ? ` -m ${shellQuote(model)}` : "";
+  const tokenArg = useLast ? "--last" : shellQuote(resumeToken);
+  return `traecli --no-daemon${postureArg} --no-alt-screen --resume ${tokenArg}${modelArg}`;
 }
 
 export function assessNativeResumeProbe(
@@ -244,6 +260,35 @@ export function assessNativeResumeProbe(
     };
   }
 
+  if (runtime === "traecli") {
+    if (paneContent.includes("not logged") || paneContent.includes("login required") || paneContent.includes("authenticate")) {
+      return {
+        status: "attention_required",
+        code: "traecli_auth_required",
+        detail: "TraeCLI requires authentication before the session can resume.",
+      };
+    }
+    if (looksLikeTraecliTui(paneContent) || paneCommand === "traecli") {
+      return {
+        status: "resumed",
+        code: "active_runtime",
+        detail: "TraeCLI is running with an active interactive TUI in the probe pane.",
+      };
+    }
+    if (SHELL_COMMANDS.has(paneCommand)) {
+      return {
+        status: "failed",
+        code: "returned_to_shell",
+        detail: "The probe pane returned to a shell instead of staying inside TraeCLI.",
+      };
+    }
+    return {
+      status: "inconclusive",
+      code: "awaiting_runtime",
+      detail: "TraeCLI did not report an explicit failure, but an interactive conversation has not been observed.",
+    };
+  }
+
   return {
     status: "inconclusive",
     code: "unsupported_runtime",
@@ -371,6 +416,15 @@ function looksLikeCodexTui(paneContent: string): boolean {
         && fields.some((field) => /^gpt-\d[\w.-]*(?: [\w-]+)?$/i.test(field));
     });
   return hasPromptLine && (current.includes("OpenAI Codex (v") || hasModelFooter || hasCustomModelFooter);
+}
+
+function looksLikeTraecliTui(paneContent: string): boolean {
+  const promptPattern = /(^|\n)\s*(?:❯|>)\s*$/m;
+  return promptPattern.test(paneContent) && (
+    paneContent.toLowerCase().includes("trae")
+    || paneContent.includes("✨")
+    || /(^|\n)\s*⏵/.test(paneContent)
+  );
 }
 
 // Codex prints these messages when its stored OAuth access token can no

@@ -114,6 +114,13 @@ export class RuntimeVerifier {
     return result;
   }
 
+  /** Verify TraeCLI: `traecli --version`, fallback to `traecli --help`. */
+  async verifyTraecli(): Promise<RuntimeVerification> {
+    const result = await this.verifyVersionOrHelp("traecli", "traecli");
+    this.persist(result);
+    return result;
+  }
+
   /**
    * Verify multiple runtimes. Returns results in input order.
    * @param runtimes - canonical runtime names: 'tmux', 'cmux', 'claude-code', 'codex', 'pi', 'omp'
@@ -128,6 +135,7 @@ export class RuntimeVerifier {
         case "codex": results.push(await this.verifyCodex()); break;
         case "pi": results.push(await this.verifyPi()); break;
         case "omp": results.push(await this.verifyOmp()); break;
+        case "traecli": results.push(await this.verifyTraecli()); break;
         default: {
           const v = this.buildVerification(runtime, "not_found", null, null, `unknown runtime: ${runtime}`);
           this.persist(v);

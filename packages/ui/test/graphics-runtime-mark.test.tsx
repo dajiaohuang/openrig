@@ -14,6 +14,9 @@ describe("graphics runtime package", () => {
     expect(runtimeBrand("claude-code").label).toBe("Claude");
     expect(normalizeRuntimeBrandId("codex")).toBe("codex");
     expect(runtimeBrand("codex").label).toBe("Codex");
+    expect(normalizeRuntimeBrandId("traecli")).toBe("traecli");
+    expect(normalizeRuntimeBrandId("trae-code")).toBe("traecli");
+    expect(runtimeBrand("traecli").label).toBe("Trae CLI");
   });
 
   it("normalizes tool brands for CMUX, tmux, VS Code, and screenshots", () => {
@@ -40,6 +43,12 @@ describe("graphics runtime package", () => {
   it("keeps standalone runtime marks named for icon-only use", () => {
     render(<RuntimeMark runtime="claude-code" />);
     expect(screen.getByRole("img", { name: "Claude" })).toBeTruthy();
+  });
+
+  it("renders Trae CLI runtime marks", () => {
+    render(<RuntimeBadge runtime="traecli" compact />);
+    expect(screen.getByText("Trae")).toBeTruthy();
+    expect(screen.getByRole("img", { name: "Trae CLI" })).toBeTruthy();
   });
 
   it("renders inline runtime labels without badge chrome", () => {

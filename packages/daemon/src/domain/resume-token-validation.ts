@@ -9,7 +9,7 @@
 // actually resume" probe is intentionally out of scope (heavy + must not
 // mutate live state); format validation is the safe, side-effect-free floor.
 
-export type ResumeType = "claude_id" | "codex_id" | "pi_session_file" | "omp_session_file";
+export type ResumeType = "claude_id" | "codex_id" | "traecli_id" | "pi_session_file" | "omp_session_file";
 
 export interface ResumeTokenValidationOk {
   ok: true;
@@ -46,6 +46,7 @@ const SESSION_FILE_SUFFIX = ".jsonl";
 export function resumeTypeForRuntime(runtime: string | null): ResumeType | null {
   if (runtime === "claude-code") return "claude_id";
   if (runtime === "codex") return "codex_id";
+  if (runtime === "traecli") return "traecli_id";
   if (runtime === "pi") return "pi_session_file";
   if (runtime === "omp") return "omp_session_file";
   return null;
@@ -95,7 +96,7 @@ export function validateResumeToken(
   if (!resumeType) {
     return {
       ok: false,
-      error: `set-resume-token is not supported for runtime "${runtime ?? "unknown"}" (only claude-code, codex, pi, and omp have resume tokens).`,
+      error: `set-resume-token is not supported for runtime "${runtime ?? "unknown"}" (only claude-code, codex, traecli, pi, and omp have resume tokens).`,
     };
   }
   if (typeof rawToken !== "string") {

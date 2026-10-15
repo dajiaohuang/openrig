@@ -1,6 +1,6 @@
 import { mockShellCommand } from "./helpers/shell-command-mock.js";
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { yoloEnabled, codexPostureArg, piTrust } from "../src/adapters/yolo-mode.js";
+import { yoloEnabled, codexPostureArg, piTrust, traecliPostureArg } from "../src/adapters/yolo-mode.js";
 import { buildCodexResumeCore } from "../src/domain/native-resume-probe.js";
 import { ClaudeCodeAdapter, type ClaudeAdapterFsOps } from "../src/adapters/claude-code-adapter.js";
 import { ClaudeResumeAdapter } from "../src/adapters/claude-resume.js";
@@ -142,6 +142,12 @@ describe("OPR.0.4.8.2 YOLO mode — opt-in, default OFF, launch-flag surface onl
     expect(codexPostureArg(" -p 'x'", {} as NodeJS.ProcessEnv)).toBe(" -p 'x'");
     expect(codexPostureArg("", {} as NodeJS.ProcessEnv)).toBe(" -s workspace-write");
     expect(codexPostureArg(" -p 'x'", { OPENRIG_YOLO: "1" } as NodeJS.ProcessEnv)).toBe(" -s danger-full-access");
+  });
+
+  it("traecliPostureArg: OFF -> workspace-write/on-request; ON -> danger-full-access; full bypass -> -y and never", () => {
+    expect(traecliPostureArg({} as NodeJS.ProcessEnv)).toBe(" -s workspace-write -a on-request");
+    expect(traecliPostureArg({ OPENRIG_YOLO: "1" } as NodeJS.ProcessEnv)).toBe(" -s danger-full-access");
+    expect(traecliPostureArg({} as NodeJS.ProcessEnv, "full_bypass")).toBe(" -y -a never");
   });
 
   it("piTrust (RESOURCE TRUST, not permission policy): OFF keeps configured/no-approve; ON forces approve", () => {

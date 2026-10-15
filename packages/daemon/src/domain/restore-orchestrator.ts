@@ -16,6 +16,7 @@ import type { ClaudeResumeAdapter } from "../adapters/claude-resume.js";
 import type { CodexResumeAdapter } from "../adapters/codex-resume.js";
 import type { PiResumeAdapter } from "../adapters/pi-resume.js";
 import type { OmpResumeAdapter } from "../adapters/omp-resume.js";
+import type { TraecliResumeAdapter } from "../adapters/traecli-resume.js";
 import type { TranscriptStore } from "./transcript-store.js";
 import { assessNativeResumeProbe } from "./native-resume-probe.js";
 import { verifyClaudePaneProcess } from "./native-process-lineage.js";
@@ -143,6 +144,7 @@ interface RestoreOrchestratorDeps {
    *  resume without the adapter falls through to the honest no-adapter error. */
   piResume?: PiResumeAdapter;
   ompResume?: OmpResumeAdapter;
+  traecliResume?: TraecliResumeAdapter;
   transcriptStore?: TranscriptStore;
   serviceOrchestrator?: import("./service-orchestrator.js").ServiceOrchestrator;
   listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>;
@@ -162,6 +164,7 @@ export class RestoreOrchestrator {
   private codexResume: CodexResumeAdapter;
   private piResume: PiResumeAdapter | null;
   private ompResume: OmpResumeAdapter | null;
+  private traecliResume: TraecliResumeAdapter | null;
   private transcriptStore: TranscriptStore | null;
   private serviceOrchestrator: import("./service-orchestrator.js").ServiceOrchestrator | null;
   private listProcesses: (() => Promise<Array<{ pid: number; ppid: number; command: string }>>) | undefined;
@@ -202,6 +205,7 @@ export class RestoreOrchestrator {
     this.codexResume = deps.codexResume;
     this.piResume = deps.piResume ?? null;
     this.ompResume = deps.ompResume ?? null;
+    this.traecliResume = deps.traecliResume ?? null;
     this.transcriptStore = deps.transcriptStore ?? null;
     this.serviceOrchestrator = deps.serviceOrchestrator ?? null;
     this.listProcesses = deps.listProcesses;
@@ -1485,7 +1489,8 @@ export class RestoreOrchestrator {
     let permissionMode: string | undefined;
     try {
       const runtime = this.claudeResume.canResume(resumeType, resumeToken) ? "claude-code"
-        : this.codexResume.canResume(resumeType, resumeToken) ? "codex" : "pi";
+        : this.codexResume.canResume(resumeType, resumeToken) ? "codex"
+        : this.traecliResume?.canResume(resumeType, resumeToken) ? "traecli" : "pi";
       const override = new NativePermissionStore(this.db).launchOverride(nodeId, runtime);
       kernelAuthority = override.kernelAuthority === true;
       teamPermissionDefault = override.teamPermissionDefault === true;
@@ -1560,6 +1565,21 @@ export class RestoreOrchestrator {
     if (this.ompResume?.canResume(resumeType, resumeToken)) {
       const result = await this.ompResume.resume(sessionName, resumeType, resumeToken, cwd, model, resolvedPosture);
       if (result.ok) {
+        if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);
+        return { kind: "resumed" };
+      }
+      if (result.code === "retry_fresh") return { kind: "retry_fresh" };
+      if (result.code === "attention_required") {
+        return { kind: "attention_required", message: result.message, evidence: (result as { evidence?: string }).evidence };
+      }
+      return { kind: "failed", message: result.message };
+    }
+
+    if (this.traecliResume?.canResume(resumeType, resumeToken)) {
+      const result = await this.traecliResume.resume(sessionName, resumeType, resumeToken, cwd, resolvedPosture, model, ...launchTail);
+      if (result.ok) {
+        const notice = nonInterruptiveNotice("traecli", { nonInterruptive, launchPosture: resolvedPosture, permissionMode });
+        if (notice) warnings?.push(`${sessionName}: ${notice}`);
         if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);
         return { kind: "resumed" };
       }

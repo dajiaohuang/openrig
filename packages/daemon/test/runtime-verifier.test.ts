@@ -106,6 +106,17 @@ describe("RuntimeVerifier", () => {
     expect(result.runtime).toBe("codex");
   });
 
+  it("traecli --version succeeds -> verified", async () => {
+    const exec = createMockExec({ "traecli --version": "traecli 1.2.3" });
+    const verifier = new RuntimeVerifier({ exec, db });
+
+    const result = await verifier.verifyTraecli();
+
+    expect(result.status).toBe("verified");
+    expect(result.version).toBe("1.2.3");
+    expect(result.runtime).toBe("traecli");
+  });
+
   // T7: verifyTmux auto-persists to DB
   it("verification auto-persists to runtime_verifications table", async () => {
     const exec = createMockExec({ "tmux -V": "tmux 3.4" });
@@ -212,22 +223,24 @@ describe("RuntimeVerifier", () => {
     const exec = createMockExec({
       "codex --version": "codex 0.5.0",
       "claude --version": "claude 1.2.3",
+      "traecli --version": "traecli 1.2.3",
       "tmux -V": "tmux 3.4",
     });
     const verifier = new RuntimeVerifier({ exec, db });
 
-    const results = await verifier.verifyAll(["codex", "claude-code", "tmux"]);
+    const results = await verifier.verifyAll(["codex", "claude-code", "traecli", "tmux"]);
 
     // Input order preserved
-    expect(results).toHaveLength(3);
+    expect(results).toHaveLength(4);
     expect(results[0]!.runtime).toBe("codex");
     expect(results[1]!.runtime).toBe("claude-code");
-    expect(results[2]!.runtime).toBe("tmux");
+    expect(results[2]!.runtime).toBe("traecli");
+    expect(results[3]!.runtime).toBe("tmux");
 
     // All persisted with canonical names
     const rows = db.prepare("SELECT runtime FROM runtime_verifications ORDER BY runtime")
       .all() as Array<{ runtime: string }>;
     const names = rows.map((r) => r.runtime).sort();
-    expect(names).toEqual(["claude-code", "codex", "tmux"]);
+    expect(names).toEqual(["claude-code", "codex", "tmux", "traecli"]);
   });
 });

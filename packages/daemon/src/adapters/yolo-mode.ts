@@ -69,6 +69,23 @@ export function codexPostureArg(
   return profileArg ? profileArg : " -s workspace-write";
 }
 
+/**
+ * TraeCLI launch posture segment (leading space included), applied on EVERY managed TraeCLI path
+ * (fresh / resume / fork). Mirrors codexPostureArg:
+ * - full_bypass → ` -y` (dangerously bypass approvals and sandbox) + approval never.
+ * - YOLO ON → ` -s danger-full-access` (maximally-permissive sandbox).
+ * - OFF → explicit workspace-write floor ` -s workspace-write -a on-request`.
+ * TraeCLI supports both -s <sandbox> and -y / --permission-mode; we use -s for parity with Codex.
+ */
+export function traecliPostureArg(
+  env: NodeJS.ProcessEnv = process.env,
+  resolvedPosture?: ResolvedLaunchPosture,
+): string {
+  if (resolvedPosture === "full_bypass") return " -y -a never";
+  if (yoloEnabled(env, resolvedPosture)) return " -s danger-full-access";
+  return " -s workspace-write -a on-request";
+}
+
 /** Pi RESOURCE TRUST (Pi's --approve/--no-approve govern resource trust, NOT a permission policy):
  *  YOLO forces `approve`; otherwise the configured posture (default `no-approve`). */
 export function piTrust(
