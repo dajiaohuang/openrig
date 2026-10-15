@@ -479,7 +479,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
 
   const argvExec = opts?.argvExec
     ?? (opts?.tmuxExec ? undefined : process.platform === "win32" ? execArgvCommand : undefined);
-  const tmuxAdapter = new TmuxAdapter(opts?.tmuxExec ?? execCommand, undefined, argvExec);
+  const tmuxAdapter = new TmuxAdapter(opts?.tmuxExec ?? execCommand, undefined, argvExec,
+    process.platform === "win32" && !opts?.tmuxExec ? "psmux" : "tmux");
   const deliveryGuard = new SeatDeliveryGuard(db, target => resolveGuardTarget(db, target));
   deliveryGuard.recoverActivation();
   tmuxAdapter.deliveryGuard = deliveryGuard;
@@ -595,7 +596,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     },
   });
   const { SeatLaunchEnvironment } = await import("./domain/seat-launch-environment.js");
-  const seatLaunchEnvironment = new SeatLaunchEnvironment(tmuxAdapter, launchSessionEnv, process.cwd(), undefined, configuredCodexHome);
+  const seatLaunchEnvironment = new SeatLaunchEnvironment(tmuxAdapter, launchSessionEnv, process.cwd(), undefined, configuredCodexHome,
+    process.platform === "win32" ? "win32" : "posix");
   const nodeLauncher = new NodeLauncher({
     db,
     rigRepo,
@@ -883,6 +885,19 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       } catch (err) {
         console.error(`[openrig] global ${skill} skill setup warning: ${(err as Error).message}`);
       }
+    }
+    // `rigs` is the person-facing guide (skills/rigs, the skills.sh front door), for a session that isn't on a
+    // team yet, so it isn't a plugin skill: that would put it in every seat's loadout. Its packaged copy
+    // installs under OpenRig's own version, so each upgrade refreshes it; a copy installed another way has no
+    // OpenRig marker and is left as it is.
+    try {
+      const { getDaemonVersion } = await import("./domain/daemon-version.js");
+      vendorService.ensureSkillDirGlobally(nodePath.resolve(import.meta.dirname, "../assets/skills/rigs"), "rigs", getDaemonVersion(), [
+        nodePath.join(os.homedir(), ".claude", "skills"),
+        nodePath.join(os.homedir(), ".agents", "skills"),
+      ]);
+    } catch (err) {
+      console.error(`[openrig] global rigs skill setup warning: ${(err as Error).message}`);
     }
   } catch (err) {
     console.error(`[openrig] plugin vendor setup warning: ${(err as Error).message}`);

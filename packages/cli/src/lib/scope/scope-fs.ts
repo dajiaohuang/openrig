@@ -78,8 +78,9 @@ export function readFrontmatter(absPath: string): Record<string, unknown> {
 }
 
 /** Update specific keys in a markdown file's frontmatter. The writer owns only
- *  those keys: every other byte in an existing block stays untouched. This is
- *  deliberately the CLI twin of the daemon approval splicer; parsing and
+ *  those keys in valid mappings, preserving inline comments and unowned bytes.
+ *  Invalid mappings retain the legacy line-based update with a warning. Valid
+ *  mappings are matched by decoded YAML key identity and spliced by source range;
  *  re-serializing the whole block destroys author quoting, folded scalars,
  *  ordering, and therefore any hash derived before a repair. */
 export function updateFrontmatter(
@@ -95,7 +96,27 @@ export function updateFrontmatter(
     return;
   }
 
-  let block = match[1]!;
+  const originalBlock = match[1]!;
+  const blockStart = match.index + match[0].length - originalBlock.length - 4;
+  const blockEnd = blockStart + originalBlock.length - (originalBlock.endsWith("\r") ? 1 : 0);
+  const newline = original.slice(blockEnd, blockEnd + 2) === "\r\n" ? "\r\n" : "\n";
+  let block: string;
+  try {
+    block = updateMappedFrontmatter(original.slice(blockStart, blockEnd), updates, newline, absPath);
+  } catch (error) {
+    if (!(error instanceof ScopeCliError)) throw error;
+    console.warn(`[warn] ${absPath}: frontmatter isn't valid YAML; using line-based updates. Listing cannot read its fields until the YAML is fixed.`);
+    // Start again from the original block, including when a splice removed a used anchor.
+    block = updateFrontmatterLines(originalBlock, updates);
+    const updated = original.slice(0, match.index) + `---\n${block}\n---` + original.slice(match.index + match[0].length);
+    fs.writeFileSync(absPath, updated, "utf8");
+    return;
+  }
+  fs.writeFileSync(absPath, original.slice(0, blockStart) + block + original.slice(blockEnd), "utf8");
+}
+
+/** Keep main's line-based update for YAML that cannot use source-range splicing. */
+function updateFrontmatterLines(block: string, updates: Record<string, unknown>): string {
   for (const [key, value] of Object.entries(updates)) {
     if (value === undefined) continue;
     const rendered = YAML.stringify({ [key]: value }, { lineWidth: 0 }).trimEnd();
@@ -111,8 +132,62 @@ export function updateFrontmatter(
       block = block.length > 0 ? `${block}\n${rendered}` : rendered;
     }
   }
-  const updated = original.slice(0, match.index) + `---\n${block}\n---` + original.slice(match.index + match[0].length);
-  fs.writeFileSync(absPath, updated, "utf8");
+  return block;
+}
+
+function updateMappedFrontmatter(
+  block: string,
+  updates: Record<string, unknown>,
+  newline: string,
+  absPath: string,
+): string {
+  for (const [key, value] of Object.entries(updates)) {
+    if (value === undefined) continue;
+    const mapping = frontmatterMapping(block, absPath);
+    const flow = mapping?.flow === true;
+    let rendered = YAML.stringify({ [key]: value }, { lineWidth: 0, collectionStyle: flow ? "flow" : "block" }).trimEnd();
+    if (flow) rendered = rendered.slice(1, -1).trim();
+    const existing = mapping?.items.find((pair) => YAML.isScalar(pair.key) && pair.key.value === key);
+    if (existing && YAML.isScalar(existing.key)) {
+      const start = existing.srcToken?.start.find((token) => token.type === "explicit-key-ind")?.offset ?? existing.key.range?.[0];
+      const end = YAML.isNode(existing.value) ? existing.value.range?.[1] : undefined;
+      if (start === undefined || end === undefined) refuseFrontmatterUpdate(absPath);
+      const ending = block.slice(start, end).endsWith("\n") ? newline : "";
+      block = block.slice(0, start) + rendered + ending + block.slice(end);
+    } else if (flow && mapping) {
+      const closing = mapping.range?.[1];
+      if (closing === undefined || block[closing - 1] !== "}") refuseFrontmatterUpdate(absPath);
+      const token = mapping.srcToken;
+      const last = token?.type === "flow-collection" ? token.items.at(-1) : undefined;
+      const trailingComma = last?.key === undefined && last?.start.some((entry) => entry.type === "comma");
+      const separator = mapping.items.length === 0 || trailingComma ? "" : ", ";
+      block = block.slice(0, closing - 1) + separator + rendered + block.slice(closing - 1);
+    } else {
+      block = block.length > 0 ? `${block}${newline}${rendered}` : rendered;
+    }
+  }
+  // Validate before writing; the caller falls back if a replaced anchor is still used.
+  frontmatterMapping(block, absPath);
+  return block;
+}
+
+function frontmatterMapping(block: string, absPath: string) {
+  const document = YAML.parseDocument(block, { keepSourceTokens: true });
+  if (document.errors.length > 0 || (document.contents !== null && !YAML.isMap(document.contents))) refuseFrontmatterUpdate(absPath);
+  try {
+    document.toJS();
+  } catch {
+    refuseFrontmatterUpdate(absPath);
+  }
+  return document.contents;
+}
+
+function refuseFrontmatterUpdate(absPath: string): never {
+  throw new ScopeCliError({
+    fact: `Frontmatter in ${absPath} cannot be updated as a valid YAML mapping.`,
+    consequence: "Authored file bytes were not changed.",
+    action: "Correct invalid YAML, duplicate keys, or unresolved aliases before retrying.",
+  });
 }
 
 // ---------------------------------------------------------------------
@@ -366,6 +441,12 @@ export function findSlice(
   slicePath: string,
   hintMission?: string | null,
 ): SliceInfo {
+  // Only a bare name with a mission hint can fall through an unrelated
+  // directory. Explicit paths keep their existing refusal and precedence.
+  const hintedName = Boolean(hintMission) && slicePath !== "" &&
+    slicePath !== "." && slicePath !== ".." &&
+    !path.isAbsolute(slicePath) && path.basename(slicePath) === slicePath;
+  let firstContextError: ScopeCliError | null = null;
   const candidates: string[] = [];
   if (path.isAbsolute(slicePath)) {
     candidates.push(slicePath);
@@ -382,17 +463,21 @@ export function findSlice(
       // Walk up to find the owning mission.
       const owningMissionPath = findOwningMission(missionsRoot, candidate);
       if (!owningMissionPath) {
-        throw new ScopeCliError({
+        const error = new ScopeCliError({
           fact: `Slice path "${slicePath}" resolved to ${candidate} but no parent mission was found.`,
           consequence: "Cannot determine mission context for this slice.",
           action: "Ensure the slice lives under <missionsRoot>/<mission>/{slices,closed}/.",
         });
+        if (!hintedName) throw error;
+        firstContextError ??= error;
+        continue;
       }
       const mission = buildMissionInfo(missionsRoot, owningMissionPath);
       const sliceRoot = path.dirname(candidate);
       return buildSliceInfo(mission, sliceRoot, path.basename(candidate));
     }
   }
+  if (firstContextError) throw firstContextError;
   throw new ScopeCliError({
     fact: `Slice "${slicePath}" not found.`,
     consequence: "Command did not run.",
@@ -498,7 +583,7 @@ export function assertCleanWorkingTree(repoRoot: string, relPath: string): void 
   try {
     status = execFileSync(
       "git",
-      ["-C", repoRoot, "status", "--porcelain", "--", relPath],
+      ["-C", repoRoot, "--literal-pathspecs", "status", "--porcelain", "--", relPath],
       { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
     );
   } catch (err) {
@@ -567,7 +652,7 @@ export function moveSlice(srcAbs: string, destAbs: string, opts: {
   const realDestAbs = path.join(realDestParent, path.basename(destAbs));
   const destRel = path.relative(repoRoot, realDestAbs);
   try {
-    execFileSync("git", ["-C", repoRoot, "mv", srcRel, destRel], {
+    execFileSync("git", ["-C", repoRoot, "mv", "--", srcRel, destRel], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -598,7 +683,7 @@ export function rollbackMovedSlice(
   }
   const srcRel = path.relative(move.repoRoot, fs.realpathSync(path.dirname(srcAbs)) + path.sep + path.basename(srcAbs));
   const destRel = path.relative(move.repoRoot, fs.realpathSync(destAbs));
-  execFileSync("git", ["-C", move.repoRoot, "mv", destRel, srcRel], {
+  execFileSync("git", ["-C", move.repoRoot, "mv", "--", destRel, srcRel], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   });

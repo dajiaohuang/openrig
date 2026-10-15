@@ -1,7 +1,7 @@
 import { serve, type ServerType } from "@hono/node-server";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { closeHttpServer, createDaemonShutdown, DAEMON_SHUTDOWN_RECEIPT, trackHttpServerResponses } from "./daemon-shutdown.js";
+import { closeHttpServer, createDaemonShutdown, DAEMON_SHUTDOWN_RECEIPT, trackHttpServerResponses, startWindowsDaemonControl } from "./daemon-shutdown.js";
 import { readOpenRigEnv, OPENRIG_HOME } from "./openrig-compat.js";
 import { makeOperatorDeliveryEngine } from "./domain/gateway/operator-delivery-engine.js";
 import { resolveDaemonDbPath } from "./daemon-db-path.js";
@@ -10,13 +10,12 @@ import { resolveBindPlan } from "./domain/bind-plan.js";
 import { runQueueRetentionSweep, RETENTION_DEFAULTS } from "./domain/queue-retention.js";
 import {
   createStuckSweepStatus,
-  resolveSessionNodeId,
   resolveStuckSweepIntervalSeconds,
   runStuckSweep,
 } from "./domain/queue-stuck-sweep.js";
 import {
   createWakeLadderStatus,
-  classifyPromptAfterRefusal,
+  makePromptStateReader,
   resolveWakeRetryIntervalSeconds,
   runWakeLadderTick,
   WakeLadderScheduler,
@@ -189,6 +188,7 @@ export function startWakeLadderScheduler(deps: {
   providerService?: Pick<ProviderService, "getReadModel">;
   usageLimitJitterSeconds?: number;
   seatActivityService?: Pick<import("./domain/seat-activity-service.js").SeatActivityService, "getSeatState">;
+  agentActivityStore?: Pick<import("./domain/agent-activity-store.js").AgentActivityStore, "getLatestForNode">;
   gatewaySubsystem?: { dispatch: (op: string, entityBindingRef: string, payload: unknown, opts?: { decisionId?: string }) => import("./domain/gateway/dispatcher.js").DispatchResult };
 }): WakeLadderScheduler | null {
   const queueRepo = deps.queueRepo;
@@ -213,11 +213,11 @@ export function startWakeLadderScheduler(deps: {
       queueRepo,
       status,
       ...(deliveryEngine ? { deliveryEngine } : {}),
-      readPromptState: (destination, refusedAt) => {
-        const nodeId = resolveSessionNodeId(db, destination);
-        const state = nodeId ? deps.seatActivityService?.getSeatState(nodeId) : null;
-        return classifyPromptAfterRefusal(state, refusedAt);
-      },
+      readPromptState: makePromptStateReader({
+        db,
+        getSeatState: (nodeId) => deps.seatActivityService?.getSeatState(nodeId),
+        getLatestHook: (sessionName) => deps.agentActivityStore?.getLatestForNode({ sessionName }),
+      }),
       ...(deps.providerService
         ? { getProviderReadModel: () => deps.providerService!.getReadModel() }
         : {}),
@@ -378,9 +378,11 @@ export async function startServer(port?: number) {
   // exit so any in-flight policy evaluation completes (or is awaited).
   // Multi-bind: close every serve() instance in parallel.
   deps.healthDiagnosis?.start();
+  let closeWindowsControl: (() => Promise<void>) | undefined;
   const shutdown = createDaemonShutdown({
     receiptPath: path.join(OPENRIG_HOME, DAEMON_SHUTDOWN_RECEIPT),
     phases: [
+      ["windows-control", () => closeWindowsControl?.()],
       ["timers", () => {
         if (heartbeatTimer) clearInterval(heartbeatTimer);
         if (retentionTimer) clearInterval(retentionTimer);
@@ -410,6 +412,7 @@ export async function startServer(port?: number) {
   // Repeated signals join the first shutdown instead of bypassing its evidence.
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
+  if (process.platform === "win32") closeWindowsControl = await startWindowsDaemonControl(OPENRIG_HOME, () => shutdown("Windows control"));
 
   // Backward-compatible single-server return (callers that just need a
   // handle reference; multi-bind shutdown is wired via signal handlers).

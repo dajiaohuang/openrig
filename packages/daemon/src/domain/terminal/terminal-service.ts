@@ -62,6 +62,8 @@ export interface OpenViewRequest {
   view: string;
   /** Preview fingerprint. A changed membership/layout must be previewed again. */
   expectedPlan?: string;
+  /** Measured width of the viewing terminal; unknown widths keep the narrow default. */
+  viewportColumns?: number;
 }
 
 export interface TerminalPreview {
@@ -141,7 +143,10 @@ function savedMemberToInput(m: SavedViewMember): ViewMemberInput {
   };
 }
 
-type ResolvedView = { id: string; members: ViewMemberInput[]; kernelLayout?: string; columns?: number } | { code: string; error: string };
+/** The default kernel view's space name in a terminal multiplexer such as Herdr. */
+export const KERNEL_SPACE_LABEL = "openrig kernel";
+
+type ResolvedView = { id: string; members: ViewMemberInput[]; kernelLayout?: string; columns?: number; panesPerPage?: number } | { code: string; error: string };
 type ComposedTerminalView = ComposedView & { kernelLayout?: string };
 
 export class TerminalService {
@@ -174,9 +179,10 @@ export class TerminalService {
       );
     }
 
-    const composed = await this.resolveComposed(req.view, provider.panesPerPage);
+    const composed = await this.resolveComposed(req.view, provider.panesPerPage, req.viewportColumns);
     if ("code" in composed) return errorResult(providerName, composed.code, composed.error);
-    if (req.expectedPlan !== undefined && req.expectedPlan !== this.planId(providerName, composed)) {
+    const planId = this.planId(providerName, composed);
+    if (req.expectedPlan !== undefined && req.expectedPlan !== planId) {
       return errorResult(providerName, "preview_changed", "View membership or layout changed. Refresh the preview before Open; nothing was launched.");
     }
     const notes = composed.kernelLayout ? [`Default kernel view: ${composed.kernelLayout}.`] : [];
@@ -186,7 +192,7 @@ export class TerminalService {
         absent: composed.absent, degraded: composed.degraded, notes,
       };
     }
-    const result = await provider.openView(composed);
+    const result = await provider.openView({ ...composed, planId });
     if (result.opened.length === 0 && composed.opened.length > 0) {
       notes.push("In a new terminal on the daemon's host, attach directly using one of these commands:");
       for (const pane of composed.opened) notes.push(`${pane.label}: env -u TMUX ${pane.paneCommand}`);
@@ -198,13 +204,20 @@ export class TerminalService {
     return notes.length ? { ...result, notes: [...notes, ...(result.notes ?? [])] } : result;
   }
 
-  private async resolveComposed(viewArg: string, panesPerPage?: number): Promise<ComposedTerminalView | { code: string; error: string }> {
+  private async resolveComposed(viewArg: string, panesPerPage?: number, viewportColumns?: number): Promise<ComposedTerminalView | { code: string; error: string }> {
     const view = (viewArg ?? "").trim();
     if (!view) return { code: "view_required", error: "a view argument is required" };
     const resolved = await this.resolveView(view);
     if ("code" in resolved) return resolved;
-    const composed = composeView(resolved.id, await this.refineLiveness(resolved.members), { resolveHost: (id) => this.deps.resolveHost(id), panesPerPage, localTmux: await this.resolveLocalTmux() });
-    return resolved.kernelLayout ? { ...composed, kernelLayout: resolved.kernelLayout, columns: resolved.columns } : composed;
+    const composed = composeView(resolved.id, await this.refineLiveness(resolved.members), { resolveHost: (id) => this.deps.resolveHost(id), panesPerPage: resolved.panesPerPage ?? panesPerPage, localTmux: await this.resolveLocalTmux() });
+    if (resolved.kernelLayout && Number.isSafeInteger(viewportColumns) && viewportColumns! >= 120) {
+      // The default's members are operator, dashboard, advisor. Keep the advisor separate
+      // even when one of the other roles is unavailable; chunking two at a time would not.
+      const page = (indexes: number[]) => indexes.flatMap(index => composed.opened.filter(pane => pane.seat === resolved.members[index]?.seat));
+      const pages = [page([1, 0]), page([2])].filter(panes => panes.length > 0);
+      return { ...composed, opened: pages.flat(), pages, kernelLayout: resolved.kernelLayout, columns: 2, spaceLabel: KERNEL_SPACE_LABEL };
+    }
+    return resolved.kernelLayout ? { ...composed, kernelLayout: resolved.kernelLayout, columns: resolved.columns, spaceLabel: KERNEL_SPACE_LABEL } : composed;
   }
 
   private planId(provider: string, composed: ComposedView): string {
@@ -216,7 +229,7 @@ export class TerminalService {
     const providerName = (req.provider ?? DEFAULT_PROVIDER).trim() || DEFAULT_PROVIDER;
     const provider = this.deps.resolveProvider(providerName);
     if (!provider) return errorResult(providerName, "unknown_provider", `unknown provider '${providerName}'`);
-    const composed = await this.resolveComposed(req.view, provider.panesPerPage);
+    const composed = await this.resolveComposed(req.view, provider.panesPerPage, req.viewportColumns);
     if ("code" in composed) return errorResult(providerName, composed.code, composed.error);
     return { provider: providerName, view: req.view, composed, grids: composed.pages.map(page => buildGridRoot(page, composed.columns)), planId: this.planId(providerName, composed), status: await provider.status() };
   }
@@ -340,7 +353,7 @@ export class TerminalService {
   }
 
   /** An in-memory default; a user's saved kernel view always takes precedence. */
-  private async defaultKernelView(): Promise<{ id: string; members: ViewMemberInput[]; kernelLayout: string; columns: number } | null> {
+  private async defaultKernelView(): Promise<{ id: string; members: ViewMemberInput[]; kernelLayout: string; columns: number; panesPerPage: number } | null> {
     const rows = await this.deps.listRigSeats("kernel");
     if (rows == null) return null;
     const advisor = rows.find(row => row.logicalId === "advisor.lead");
@@ -348,15 +361,17 @@ export class TerminalService {
     const runtimesKnown = !!advisor?.runtime && !!operator?.runtime;
     const singleRuntime = runtimesKnown && advisor!.runtime === operator!.runtime;
     const kernelLayout = runtimesKnown ? (singleRuntime ? "single-runtime" : "dual-runtime") : "runtime layout unverified; TUI, advisor and operator";
-    const roles = ["operator.human", "advisor.lead", "operator.agent"];
-    const members = roles.map(logicalId => {
+    // One full-width conversation per page; the operator is the first populated page when ready.
+    // Panes and tabs are named for what the person sees there, not by logical id.
+    const roles: Array<[string, string]> = [["operator.agent", "operator"], ["operator.human", "dashboard"], ["advisor.lead", "advisor"]];
+    const members = roles.map(([logicalId, label]) => {
       const row = rows.find(row => row.logicalId === logicalId);
       const bound = row && deriveViewMembers([row])[0];
       // An expected role is still visible when there is no attachable binding.
       // Its logical ID names the absence; it is never used as a tmux target.
-      return bound ?? { seat: logicalId, label: logicalId, tmuxSession: null, host: null, readOnly: false, alive: false };
+      return bound ? { ...bound, label } : { seat: logicalId, label, tmuxSession: null, host: null, readOnly: false, alive: false };
     });
-    return { id: "kernel", members, kernelLayout, columns: members.length };
+    return { id: "kernel", members, kernelLayout, columns: 1, panesPerPage: 1 };
   }
 
   /** Refine local members' liveness with a real has-session probe (a dead seat → absent, honest-partial). */

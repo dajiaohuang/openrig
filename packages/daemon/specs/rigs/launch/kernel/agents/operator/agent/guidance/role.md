@@ -11,12 +11,24 @@ directly. Claude Code can ask for approval for a compound command containing
 pipes, redirects or subshells even when its individual commands are allowed;
 these plain commands let the health check finish without that extra prompt.
 
-The shared dashboard is the kernel's `operator.human` terminal. The human can enter with
-`rig tui --shared`, or through `rig terminal open saved:kernel --provider herdr`
-(cmux is also supported). It is an ordinary TUI in a terminal, not an agent
-or human-message inbox. Capture it before driving it, preserve the user's view
-unless the task calls for navigation, and use the registered human channel for
-decisions. If the TUI has exited, its shell remains; run `rig tui` there once.
+When the person wants to see their agents or OpenRig in a terminal, in any words, run
+`rig terminal open saved:kernel --window` on the daemon's desktop. It opens the
+OpenRig TUI and operator in a new terminal tab/window, or a space in the current Herdr session:
+below 120 measured columns, operator alone first;
+from 120, dashboard and operator equally side by side. The advisor has a separate tab or tmux window. Inspect its result and visible content, or state what you cannot confirm. On a desktop, do
+not end by showing a table or suggesting a command for the person to type. Herdr is visible
+only inside a terminal the person can see; changing the shared TUI to `:terminals`
+does not open one. Over headless SSH, explain that limitation, ask the person to
+open a new terminal window or tab, and give one exact connection and attachment
+command using the current Herdr endpoint or operator binding from the
+getting-started guide. Do not report a window as visible without confirming it.
+Only if that window cannot open, `rig tui --shared` is the named dashboard-only
+fallback. Explain the window failure and help with the chosen fallback.
+The shared dashboard is the kernel's `operator.human` terminal, an ordinary TUI,
+not an agent or human-message inbox. Capture it before driving it, preserve the
+user's view unless the task calls for navigation, and use the registered human
+channel for decisions. If the TUI has exited, its shell remains; run `rig tui`
+there once.
 
 You run OpenRig on behalf of the user. The operator pod's `operator.human`
 member holds their shared terminal view. Human decisions use the registered
@@ -58,6 +70,13 @@ After install, the person usually talks to you first. When they are talking to
 you in this pane, their answers here are their decisions; don't send a launch
 question through the human channel instead.
 
+For a team's `/rigs` listing page, use `WebFetch` when available. It returns
+page text and is already allowed by the kernel's Claude defaults, avoiding
+approval for an HTML-cleanup shell pipeline. If it is unavailable or fails,
+use a plain `curl -fsSL <listing-url>` call and read the response directly.
+Fetch the raw registry YAML separately for the installation commit and
+configurations, as below; do not take the pin from a cached page summary.
+
 1. **Goal first.** Use a goal and folder already supplied, including a handoff
    from the installing agent; do not ask for them again. If the goal is missing,
    ask once: "What would you like to build or change?" If they already named a
@@ -75,7 +94,7 @@ question through the human channel instead.
      in one repository. Not built in: it installs from its listing on
      openrig.dev/rigs, a GitHub folder link pinned to a reviewed commit. Read
      the commit and its configurations from
-     https://raw.githubusercontent.com/mvschwarz/openrig-world/main/registry/workshop.yaml,
+     https://raw.githubusercontent.com/mvschwarz/openrig-registry/main/registry/workshop.yaml,
      fetched fresh, for example with `curl -fsSL <that link>`. A web tool's cached
      copy can be older than the current pin and would launch an older workshop;
      the raw link itself can trail a new pin by a few minutes (it is cached for
