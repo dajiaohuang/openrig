@@ -975,6 +975,7 @@ export class TmuxAdapter {
       if (windowsCommand && bracketed && !["pwsh", "powershell"].includes(windowsCommand)) {
         const pid = await this.getPanePid(target);
         if (!pid) throw new Error("Windows pane process unavailable; no payload submitted");
+        if (policy) await policy.beforePaste();
         beforeWrite();
         // ConPTY removes bracketed-paste delimiters on its pipe. Console input
         // records preserve the delimiters and raw LF for the receiving editor.
@@ -987,6 +988,7 @@ export class TmuxAdapter {
           const phase = /failed at (read|compile|attach|open|write);/.exec(String((error as { stderr?: string }).stderr ?? ""))?.[1];
           throw new Error(`Windows console delivery failed${phase ? ` at ${phase}` : ""}; payload consumption unverified`);
         }
+        if (policy) await policy.afterPaste();
         return { ok: true };
       }
       await this.run(["tmux", "load-buffer", "-b", buffer, path],
