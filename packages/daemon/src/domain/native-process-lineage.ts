@@ -678,13 +678,13 @@ export function explainNativeRejection(rows: NativeProcessRow[], panePid: number
   const { process } = chain[0]!;
   if (runtime === "claude-code") {
     if (!expectedToken) return { kind: "no_recorded_conversation" };
-    const launched = claudeSessionToken(tokens(process.command).slice(1));
+    const launched = claudeSessionToken(rowArgv(process).slice(1));
     if (launched === expectedToken) return { kind: "passes" };
     if (launched === null) return { kind: "names_no_conversation" };
     if (launched === rotation?.token) return rotationProcess(process, rotation) ? { kind: "passes" } : { kind: "rotation_process_mismatch", conversation: launched };
     return { kind: "other_conversation", conversation: launched };
   }
-  const identities = chain.map((link) => codexConversationToken(tokens(link.process.command).slice(1), "resume"));
+  const identities = chain.map((link) => codexConversationToken(rowArgv(link.process).slice(1), "resume"));
   if (new Set(identities.filter((value) => typeof value === "string")).size > 1) return { kind: "conflicting_conversations" };
   if (requireResume) {
     if (!expectedToken) return { kind: "no_recorded_conversation" };
@@ -746,7 +746,7 @@ export async function observeCodexForkProcess(input: {
     const rows = await (input.listProcesses ?? listNativeProcesses)();
     const chain = launcherChain(nativeProcessCandidates(rows, pid, "codex"), rows);
     if (!chain?.length) return null;
-    const args = chain.map(link => tokens(link.process.command).slice(1));
+    const args = chain.map(link => rowArgv(link.process).slice(1));
     const parents = args.map(argv => codexConversationToken(argv, "fork"));
     if (!parents.includes(input.parentToken)
       || parents.some(parent => parent !== undefined && parent !== input.parentToken)
