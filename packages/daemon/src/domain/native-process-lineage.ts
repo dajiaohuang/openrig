@@ -558,12 +558,12 @@ export function parseWindowsProcesses(output: string): NativeProcessRow[] {
 }
 
 function nativeProcessCandidates(rows: NativeProcessRow[], panePid: number, runtime: NativeRuntime, selectedExecutable?: string, scriptLaunch?: boolean): NativeProcessObservation[] {
-  const exact = candidatesMatching(rows, panePid, runtime, row => claudeProcess(row, selectedExecutable));
+  const exact = candidatesMatching(rows, panePid, runtime, row => claudeProcess(row, selectedExecutable), selectedExecutable);
   if (exact.length > 0 || runtime !== "claude-code" || !selectedExecutable || scriptLaunch !== true) return exact;
-  return candidatesMatching(rows, panePid, runtime, claudeProcessAfterScript).map(candidate => ({ ...candidate, afterScript: true as const }));
+  return candidatesMatching(rows, panePid, runtime, claudeProcessAfterScript, selectedExecutable).map(candidate => ({ ...candidate, afterScript: true as const }));
 }
 
-function candidatesMatching(rows: NativeProcessRow[], panePid: number, runtime: NativeRuntime, claudeRow: (row: NativeProcessRow) => boolean): NativeProcessObservation[] {
+function candidatesMatching(rows: NativeProcessRow[], panePid: number, runtime: NativeRuntime, claudeRow: (row: NativeProcessRow) => boolean, selectedExecutable?: string): NativeProcessObservation[] {
   const byPid = new Map(rows.map((row) => [row.pid, row]));
   const root = byPid.get(panePid);
   if (root?.platform === "win32") {
