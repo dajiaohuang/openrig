@@ -360,11 +360,7 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
   const windowNotes: string[] = [];
   try {
     if (!localDaemon(client.baseUrl)) throw new Error("The window launcher must run on the daemon's own desktop; the configured daemon is remote.");
-<<<<<<< HEAD
     if (following && selectedProvider !== "herdr") throw new Error("Following requires the qualified Herdr provider.");
-=======
-<<<<<<< HEAD
->>>>>>> 998672d0a (Expand native Windows launch, control, reading and lifecycle support)
     if (session !== undefined && selectedProvider !== "herdr") throw new Error("--session selects a Herdr session; use --provider herdr.");
     if (selectedProvider && !["herdr", "tmux"].includes(selectedProvider)) throw new Error("--window supports herdr, rex or tmux. Use cmux without --window.");
     if (deps.platform === "win32") return await openWindowsTerminalView(client, view, selectedProvider, deps, expectedPlan);
