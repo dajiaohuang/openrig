@@ -10,11 +10,8 @@ import { shellQuote } from "../adapters/shell-quote.js";
 import { claudeClassicRendererEnvPrefix } from "../adapters/yolo-mode.js";
 import { parseClaudePermissionModes } from "./permission-drift.js";
 import { validateNativePermissionSelection } from "./native-permission-selection.js";
-<<<<<<< HEAD
 import { seatLaunchAdditionsForLaunch } from "./seat-launch-additions.js";
-=======
 import { renderWindowsManagedLaunch } from "../adapters/windows-launch.js";
->>>>>>> ef0038177 (Expand native Windows launch, control, reading and lifecycle support)
 
 export interface ClaudeLaunchTarget {
   nodeId: string;

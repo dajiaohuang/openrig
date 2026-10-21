@@ -346,13 +346,9 @@ export async function openTerminalWindow(client: DaemonClient, view: string, req
   const windowNotes: string[] = [];
   try {
     if (!localDaemon(client.baseUrl)) throw new Error("The window launcher must run on the daemon's own desktop; the configured daemon is remote.");
-<<<<<<< HEAD
     if (session !== undefined && selectedProvider !== "herdr") throw new Error("--session selects a Herdr session; use --provider herdr.");
     if (selectedProvider && !["herdr", "tmux"].includes(selectedProvider)) throw new Error("--window supports herdr or tmux. Use cmux without --window.");
-=======
-    if (requestedProvider && !["herdr", "tmux"].includes(requestedProvider)) throw new Error("--window supports herdr or tmux. Use cmux without --window.");
-    if (deps.platform === "win32") return await openWindowsTerminalView(client, view, requestedProvider, deps, expectedPlan);
->>>>>>> ef0038177 (Expand native Windows launch, control, reading and lifecycle support)
+    if (deps.platform === "win32") return await openWindowsTerminalView(client, view, selectedProvider, deps, expectedPlan);
     const launchWindow = await windowLauncher(deps, windowNotes);
     const measured = typeof launchWindow !== "string" ? await deps.columns?.().catch(() => undefined) : undefined;
     let viewportColumns = Number.isSafeInteger(measured) && measured! > 0 ? measured : undefined;
