@@ -80,6 +80,39 @@ function writtenState(deps: LifecycleDeps): DaemonState {
 }
 
 describe("Daemon Lifecycle", () => {
+  it.each(["ECONNRESET", "ECONNREFUSED"])("handles secondary listener %s without confusing uncertainty with a missing listener", async (code) => {
+    await import("@openrig/daemon/instance-initialization");
+    vi.useFakeTimers();
+    const release = vi.fn();
+    let spawned = false;
+    const deps = startableDeps({
+      acquireStartLock: () => ({ recordChild: vi.fn(), release }),
+      fetch: vi.fn(async (url) => {
+        if (!spawned) throw Object.assign(new Error("refused"), { code: "ECONNREFUSED" });
+        if (String(url).includes("100.64.0.9")) throw Object.assign(new Error("secondary listener probe failed"), { code });
+        return { ok: true, json: async () => ({ pid: 12345, bind: { mode: "default", hosts: ["127.0.0.1", "100.64.0.9"], tailscaleDetected: true } }) };
+      }),
+    });
+    const spawn = deps.spawn;
+    deps.spawn = vi.fn((...args) => { spawned = true; return spawn(...args); });
+    const result = startDaemon({ port: 7433, db: "openrig.sqlite" }, deps).catch((error: Error) => error);
+    await vi.runAllTimersAsync();
+    const error = await result;
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain("100.64.0.9");
+    expect((error as Error).message).not.toContain("127.0.0.1:7433/healthz not responding");
+    expect((deps.writeFile as ReturnType<typeof vi.fn>).mock.calls.some(([file]) => file === STATE_FILE)).toBe(false);
+    if (code === "ECONNRESET") {
+      expect((error as Error).message).toContain("startup reservation retained");
+      expect(deps.kill).not.toHaveBeenCalled();
+      expect(release).toHaveBeenCalledWith(true);
+    } else {
+      expect((error as Error).message).toContain("FAILED the listener adoption gate");
+      expect(deps.kill).toHaveBeenCalledWith(12345, "SIGTERM");
+      expect(release).toHaveBeenCalledWith(false);
+    }
+  });
+
   // Test 1: start resolves absolute daemon path (not cwd-relative)
   it("getDaemonPath resolves absolute path ending with daemon", () => {
     const daemonPath = getDaemonPath();

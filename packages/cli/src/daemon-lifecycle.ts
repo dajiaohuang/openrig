@@ -765,7 +765,9 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
     lock.recordChild(pid!);
     let healthy = false;
     let lastProbe = "health endpoint not responding";
+    let listenerIndeterminate = false;
     for (let i = 0; i < HEALTHZ_RETRIES; i++) {
+      listenerIndeterminate = false;
       try {
         const body = await readOwnedHealth(healthzUrl);
         if (body) {
@@ -786,6 +788,7 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
           } });
           if (gate.ok === false) throw new StartupIdentityError(`Daemon child ${pid} FAILED the listener adoption gate: ${gate.reason}`);
           if (gate.ok === true) { healthy = true; break; }
+          listenerIndeterminate = true;
           lastProbe = gate.reason;
         }
       } catch (error) {
@@ -796,6 +799,9 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
       await Promise.race([new Promise((resolve) => setTimeout(resolve, HEALTHZ_DELAY_MS)), failed]);
     }
     if (!healthy) {
+      if (listenerIndeterminate) {
+        throw new StartupChildPendingError(`Daemon child ${pid} responds at ${healthzUrl}, but listener verification is incomplete: ${lastProbe} Child left running; startup reservation retained. Inspect 'rig daemon status', daemon-start.lock and daemon.log before recovery.`);
+      }
       throw new Error(`${summarizeDaemonStartFailure(healthzUrl, deps.readFile(resolveLifecycleFile(deps, "daemon.log")))}. Last probe: ${lastProbe}`);
     }
     assertChild();
@@ -813,6 +819,7 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
     }
     return state;
   } catch (error) {
+    if (error instanceof StartupChildPendingError) throw error;
     // Only this launch's child may be cleaned up. A retained child also retains
     // the reservation so a retry cannot run another pre-bind initialization.
     // A failed ps is not exit evidence. This is our unreaped child: signal only
