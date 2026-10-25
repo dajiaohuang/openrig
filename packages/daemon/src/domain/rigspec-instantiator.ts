@@ -1,4 +1,5 @@
 import nodePath from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { effortPrecedence, readSeatEffort } from "./seat-effort.js";
 import type Database from "better-sqlite3";
 import {
@@ -17,6 +18,7 @@ import { LegacyRigSpecSchema as RigSpecSchema } from "./rigspec-schema.js"; // T
 import { LegacyRigSpecCodec as RigSpecCodec } from "./rigspec-codec.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 import type { LegacyRigSpec as RigSpec, LegacyRigSpecEdge as RigSpecEdge, InstantiateOutcome, InstantiateResult } from "./types.js"; // TODO: AS-T08b — migrate to pod-aware RigSpec
 import { resolveLaunchCwd } from "./cwd-resolution.js";
+import type { RecordCreated } from "./operation-correlation.js";
 
 // Only these edge kinds constrain launch order
 const LAUNCH_DEPENDENCY_KINDS = new Set(["delegates_to", "spawned_by"]);
@@ -66,7 +68,7 @@ export class RigInstantiator {
     this.tmuxAdapter = deps.tmuxAdapter;
   }
 
-  async instantiate(spec: RigSpec, opts?: { nonInterruptive?: boolean; env?: SeatEnv }): Promise<InstantiateOutcome> {
+  async instantiate(spec: RigSpec, opts?: { nonInterruptive?: boolean; env?: SeatEnv; recordCreated?: RecordCreated }): Promise<InstantiateOutcome> {
     // 1. Validate
     const raw = RigSpecCodec.parse(RigSpecCodec.serialize(spec));
     const validation = RigSpecSchema.validate(raw);
@@ -109,6 +111,7 @@ export class RigInstantiator {
       const txn = this.db.transaction(() => {
         const rig = this.rigRepo.createRig(spec.name);
         rigId = rig.id;
+        opts?.recordCreated?.(rig.id);
         if (opts?.nonInterruptive !== undefined) this.rigRepo.setRigNonInterruptive(rig.id, opts.nonInterruptive);
 
         for (const specNode of spec.nodes) {
@@ -125,6 +128,7 @@ export class RigInstantiator {
             packageRefs: specNode.packageRefs,
           });
           nodeIdMap[specNode.id] = node.id;
+          opts?.recordCreated?.(rig.id, node.id);
         }
 
         for (const specEdge of spec.edges) {
@@ -317,6 +321,7 @@ import { StartupOrchestrator } from "./startup-orchestrator.js";
 import { PodRepository } from "./pod-repository.js";
 import type { RigSpec as PodRigSpec, RigSpecPod, RigSpecPodMember, StartupAction, StartupFile } from "./types.js";
 import type { RuntimeAdapter, NodeBinding, ResolvedStartupFile } from "./runtime-adapter.js";
+import { seatSkillsPointerStartupFile } from "./seat-skills-pointer.js";
 import { resolveConcreteHint } from "./runtime-adapter.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import { installTopologyDefaults } from "./topology-defaults-installer.js";
@@ -333,17 +338,7 @@ import type { SeatEnv } from "./seat-env.js";
 /** OPR.0.7.0.13: the constant seat-skills pointer, merged into the project's managed guidance for a Codex seat. It
  *  names no seat, path or skill, so pod-mates share one identical block, and it tells a non-OpenRig agent it doesn't
  *  apply. Each seat reads its own list with `rig skill loadout --seat self`. */
-function seatSkillsPointerStartupFile(): ResolvedStartupFile {
-  const assetsRoot = nodePath.resolve(import.meta.dirname, "../../assets");
-  return {
-    path: "openrig-seat-skills.md",
-    absolutePath: nodePath.join(assetsRoot, "guidance/openrig-seat-skills.md"),
-    ownerRoot: assetsRoot,
-    deliveryHint: "guidance_merge",
-    required: false,
-    appliesOn: ["fresh_start", "restore"],
-  };
-}
+export { seatSkillsPointerStartupFile };
 
 function defaultCultureStartupFile(): ResolvedStartupFile {
   const assetsRoot = nodePath.resolve(import.meta.dirname, "../../assets");
@@ -419,7 +414,7 @@ export type MaterializeOutcome =
   | { ok: false; code: "validation_failed"; errors: string[] }
   | { ok: false; code: "preflight_failed"; errors: string[]; warnings: string[] }
   | { ok: false; code: "target_rig_not_found"; message: string }
-  | { ok: false; code: "materialize_conflict"; message: string }
+  | { ok: false; code: "materialize_conflict"; message: string; existingNodeId?: string }
   | { ok: false; code: "materialize_error"; message: string }
   // S5b (OPR.0.5.4.11) — running-name guard refusal on the CREATE branch only
   // (expand/add_member pass targetRigId and are never guarded here).
@@ -477,7 +472,7 @@ export type AddMemberOutcome =
   | { ok: true; result: AddMemberResult }
   | { ok: false; code: "rig_not_found"; message: string }
   | { ok: false; code: "pod_not_found"; message: string }
-  | { ok: false; code: "member_conflict"; message: string }
+  | { ok: false; code: "member_conflict"; message: string; existingNodeId?: string }
   | { ok: false; code: "edge_unresolved"; message: string }
   | { ok: false; code: "materialize_error"; message: string }
   | { ok: false; code: "validation_failed"; errors: string[] }
@@ -508,6 +503,11 @@ export class PodRigInstantiator {
     if (deps.db !== deps.nodeLauncher.db) throw new Error("PodRigInstantiator: nodeLauncher must share the same db handle");
     this.db = deps.db;
     this.deps = deps;
+  }
+
+  /** Slice 16: the skill-catalog context a launch resolves with, so a runtime switch's target materials match it. */
+  runtimeSwitchMaterialContext(): { skillsRoot?: string; systemSkills?: string[]; systemWorldError?: string } {
+    return { skillsRoot: this.resolveSkillsRoot(), ...this.systemWorldResolutionContext() };
   }
 
   /** One configured catalog root for preflight, materialization, and launch. */
@@ -661,6 +661,7 @@ export class PodRigInstantiator {
       cwdOverride?: string;
       /** S9: ordinary member growth targets this already-persisted pod. */
       existingPodNamespace?: string;
+      recordCreated?: RecordCreated;
     },
   ): Promise<MaterializeOutcome> {
     const persistedEvents: Array<ReturnType<EventBus["persistWithinTransaction"]>> = [];
@@ -683,6 +684,7 @@ export class PodRigInstantiator {
         if (!materializedRigId) {
           const rig = this.deps.rigRepo.createRig(rigSpec.name);
           materializedRigId = rig.id;
+          opts?.recordCreated?.(rig.id);
           persistedEvents.push(this.deps.eventBus.persistWithinTransaction({ type: "rig.created", rigId: materializedRigId }));
         }
 
@@ -732,7 +734,8 @@ export class PodRigInstantiator {
           for (const member of pod.members) {
             const qualifiedId = `${pod.id}.${member.id}`;
             if (logicalIdToNodeId.has(qualifiedId)) {
-              throw { code: "materialize_conflict", message: `Logical ID '${qualifiedId}' already exists in rig '${currentRig.rig.name}'` };
+              throw { code: "materialize_conflict", message: `Logical ID '${qualifiedId}' already exists in rig '${currentRig.rig.name}'`,
+                ...(opts?.recordCreated ? { existingNodeId: logicalIdToNodeId.get(qualifiedId) } : {}) };
             }
           }
         }
@@ -773,8 +776,10 @@ export class PodRigInstantiator {
               member,
               podId: podRecord.id,
               rigRoot,
+              rigSpec,
               cwdOverride: opts?.cwdOverride,
             });
+            opts?.recordCreated?.(materializedRigId, node.id);
             logicalIdToNodeId.set(qualifiedId, node.id);
             // Seam B R2: restart-stable provenance persists AT MATERIALIZE (a
             // materialized-but-never-launched seat must still restore its posture).
@@ -819,6 +824,14 @@ export class PodRigInstantiator {
           }
           this.deps.rigRepo.addEdge(materializedRigId, fromId, toId, edge.kind);
         }
+
+        const layers = this.deps.rigRepo.getRigStartupLayers(materializedRigId) ?? { root: nodePath.resolve(rigRoot) };
+        this.deps.rigRepo.setRigStartupLayers(materializedRigId, { ...layers, materializedSources: [
+          ...(layers.materializedSources ?? []),
+          { root: nodePath.resolve(rigRoot), spec: rigSpec,
+            nodeIds: nodeResults.map(result => logicalIdToNodeId.get(result.logicalId)!),
+            ...(opts?.cwdOverride ? { cwdOverride: opts.cwdOverride } : {}) },
+        ] });
 
         persistedEvents.push(this.deps.eventBus.persistWithinTransaction({
           type: "topology.roster_recorded",
@@ -871,13 +884,85 @@ export class PodRigInstantiator {
       };
     } catch (err) {
       if (err && typeof err === "object" && "code" in err && "message" in err) {
-        const typed = err as { code: string; message: string };
+        const typed = err as { code: string; message: string; existingNodeId?: string };
         if (typed.code === "materialize_conflict") {
-          return { ok: false, code: "materialize_conflict", message: typed.message };
+          return { ok: false, code: "materialize_conflict", message: typed.message, ...(typed.existingNodeId ? { existingNodeId: typed.existingNodeId } : {}) };
         }
       }
       return { ok: false, code: "materialize_error", message: err instanceof Error ? err.message : String(err) };
     }
+  }
+
+  /** Ordinary single-seat launch can start a never-occupied materialized member.
+   * Reuse the original declaration and launch effect; history always stays on restore. */
+  async launchFirstMaterializedNode(rigId: string, nodeId: string): Promise<{
+    ok: boolean; rigId: string; nodeId: string; logicalId: string; code?: string;
+    error?: string; sessionName?: string; warnings?: string[];
+  } | null> {
+    const guard = this.deps.tmuxAdapter?.deliveryGuard;
+    if (guard && !guard.ownsLifecycle(nodeId)) {
+      return guard.lifecycle([nodeId], () => this.launchFirstMaterializedNode(rigId, nodeId));
+    }
+    const rig = this.deps.rigRepo.getRig(rigId);
+    const node = rig?.nodes.find(entry => entry.id === nodeId);
+    const source = this.deps.rigRepo.getRigStartupLayers(rigId)?.materializedSources?.find(entry => entry.nodeIds.includes(nodeId));
+    if (!rig || !node || !source) return null;
+    const pristine = () => !this.deps.sessionRegistry.getBindingForNode(nodeId)
+      && !this.deps.sessionRegistry.getSessionsForRig(rigId).some(session => session.nodeId === nodeId)
+      && !this.db.prepare("SELECT 1 FROM node_startup_context WHERE node_id = ?").get(nodeId);
+    if (!pristine()) return null;
+    const failure = (code: string, error: string) => ({ ok: false, rigId, nodeId, logicalId: node.logicalId, code, error });
+    const context = this.findMemberContext(source.spec, node.logicalId);
+    if (!context) return failure("selection_changed", "The seat no longer matches its recorded member identity; inspect the rig before launching.");
+    // The declaration supplies startup content; an ordinary launch uses saved seat settings.
+    // Leave policy refs out of this synthetic spec so launchBinding uses saved provenance,
+    // rather than treating an old declaration as a fresh request to reapply its permissions.
+    const contract = () => {
+      const liveRig = this.deps.rigRepo.getRig(rigId);
+      const live = liveRig?.nodes.find(entry => entry.id === nodeId);
+      if (!liveRig || !live) return null;
+      return { name: liveRig.rig.name, logicalId: live.logicalId, podId: live.podId,
+        member: { ...context.member, agentRef: live.agentRef ?? "", profile: live.profile ?? "default", runtime: live.runtime ?? "",
+          model: live.model ?? undefined, effort: live.effort ?? undefined, advisor: live.advisor ?? undefined,
+          codexConfigProfile: live.codexConfigProfile ?? undefined, cwd: live.cwd ?? context.member.cwd,
+          env: live.env ?? undefined, restorePolicy: live.restorePolicy ?? undefined, sessionSource: live.sessionSource ?? undefined,
+          permissionPolicy: undefined },
+        effortChoice: live.effortChoice ?? null, env: this.deps.rigRepo.getRigEnv(rigId),
+        policyRef: live.permissionPolicy ?? null, rigPolicyRef: this.deps.rigRepo.getRigPermissionPolicy(rigId),
+        policy: this.deps.rigRepo.getNodePolicyProvenance(nodeId), rigPolicy: this.deps.rigRepo.getRigPolicyProvenance(rigId) };
+    };
+    const saved = contract()!;
+    const selected = { ...source.spec, name: saved.name, env: saved.env ?? undefined, permissionPolicy: undefined,
+      pods: [{ ...context.pod, members: [saved.member], edges: [] }], edges: [] };
+    const inherited = saved.policy ? { ...saved.policy, ref: saved.policy.nodeRef ?? saved.rigPolicy?.rigRef ?? "none",
+      resolvedTarget: saved.policy.resolvedTarget ?? undefined, declaringDir: saved.policy.declaringDir ?? undefined }
+      : this.inheritedPermissionPolicy(rigId);
+    const preflight = await preflightValidatedSpec(selected, { rigRoot: source.root,
+      fsOps: this.deps.fsOps, skillsRoot: this.resolveSkillsRoot(), ...this.systemWorldResolutionContext(),
+      inheritedPermissionPolicy: inherited, exec: this.deps.exec, claudeActivityAssets: this.deps.claudeActivityAssets });
+    if (!preflight.ready) return failure("preflight_failed", preflight.errors.join("; "));
+    const name = deriveCanonicalSessionName(context.pod.id, saved.member.id, saved.name);
+    try { await this.deps.tmuxAdapter?.startServer(); }
+    catch { return failure("target_liveness_unknown", "The tmux server could not be started; nothing was launched. Check rig doctor and the daemon’s tmux server, then retry."); }
+    const probe = await this.deps.tmuxAdapter?.probeSession(name);
+    if (probe?.state === "present") return failure("target_session_present", `Session "${name}" is present; nothing was launched. Inspect it with rig capture ${name} before choosing whether to stop it.`);
+    if (probe?.state !== "absent") return failure("target_liveness_unknown", `Could not determine whether session "${name}" exists; nothing was launched. Check rig doctor and the daemon's tmux server, then retry.`);
+    if (!pristine() || !isDeepStrictEqual(contract(), saved)) {
+      return failure("selection_changed", "The seat identity, occupancy or launch settings changed during first-start checks; inspect its status and retry.");
+    }
+    const changed = (["agentRef", "profile", "runtime", "model", "effort", "advisor", "codexConfigProfile"] as const)
+      .filter(key => !isDeepStrictEqual(saved.member[key] ?? null, context.member[key] ?? null));
+    const changes: string[] = [...changed];
+    if (saved.effortChoice && saved.effortChoice !== (context.member.effort ?? null)) changes.push("saved effort choice");
+    if (saved.policyRef !== (context.member.permissionPolicy ?? null)
+      || saved.rigPolicyRef !== (source.spec.permissionPolicy ?? null)) changes.push("permission policy");
+    const launched = await this.launchValidatedSpec(selected, source.root, rigId);
+    if (!launched.ok) return failure(launched.code, "message" in launched ? launched.message : launched.errors.join("; "));
+    const result = launched.result.nodes[0]!;
+    if (changes.length) preflight.warnings.push(`First start uses the seat's current saved ${changes.join(", ")} instead of the materialized declaration.`);
+    return { ok: result.status === "launched", rigId, nodeId, logicalId: node.logicalId,
+      ...(result.status !== "launched" ? { code: result.status, error: result.error } : {}),
+      sessionName: result.sessionName, warnings: [...preflight.warnings, ...(launched.result.warnings ?? [])] };
   }
 
   async launchMaterialized(
@@ -950,7 +1035,7 @@ export class PodRigInstantiator {
         continue;
       }
 
-      const launched = await this.launchBinding({
+      const launched = await this.launchValidatedMember({
         rigId: targetRigId,
         rigSpec,
         rigRoot,
@@ -1009,7 +1094,7 @@ export class PodRigInstantiator {
     rigRoot: string,
     opts?: { cwdOverride?: string; edges?: Array<{ from: string; to: string; kind: string }>;
       /** A fork's source seat: its launch additions are copied into this new seat once it is validated, and kept. */
-      launchAdditionsFrom?: SeatSkillPaths },
+      launchAdditionsFrom?: SeatSkillPaths; recordCreated?: RecordCreated },
   ): Promise<AddMemberOutcome> {
     // 1. Resolve the rig.
     const rig = this.deps.rigRepo.getRig(rigId);
@@ -1060,10 +1145,12 @@ export class PodRigInstantiator {
     // colliding logical id would be a real seat collision — reject it honestly.
     // (validate's externalQualifiedIds only resolves edge targets; it does NOT
     // reject a member colliding with an existing node, so this guard is load-bearing.)
-    if (rig.nodes.some((node) => node.logicalId === qualifiedId)) {
+    const existingNode = rig.nodes.find((node) => node.logicalId === qualifiedId);
+    if (existingNode) {
       return {
         ok: false,
         code: "member_conflict",
+        ...(opts?.recordCreated ? { existingNodeId: existingNode.id } : {}),
         message: `Member "${qualifiedId}" already exists in rig "${rig.rig.name}". Pick a different member id, or remove the existing seat first.`,
       };
     }
@@ -1142,6 +1229,7 @@ export class PodRigInstantiator {
       suppressSummaryEvent: true,
       cwdOverride: opts?.cwdOverride,
       existingPodNamespace: podNamespace,
+      recordCreated: opts?.recordCreated,
     });
     if (!materialized.ok) {
       const message = "message" in materialized
@@ -1150,7 +1238,7 @@ export class PodRigInstantiator {
           ? materialized.errors.join("; ")
           : "member materialization failed";
       if (materialized.code === "materialize_conflict") {
-        return { ok: false, code: "member_conflict", message };
+        return { ok: false, code: "member_conflict", message, ...(opts?.recordCreated && materialized.existingNodeId ? { existingNodeId: materialized.existingNodeId } : {}) };
       }
       return { ok: false, code: "materialize_error", message };
     }
@@ -1294,7 +1382,7 @@ export class PodRigInstantiator {
     return { ok: true, rigId, nodeId, logicalId: node.logicalId, status: "launched", sessionName: result.sessionName, warnings: result.warnings };
   }
 
-  async instantiate(rigSpecYaml: string, rigRoot: string, opts?: { nonInterruptive?: boolean; cwdOverride?: string; env?: SeatEnv; installRoot?: string; force?: boolean; prelaunchHook?: (rigId: string, replacedRigIds: readonly string[]) => Promise<{ ok: true; rollback?: () => Promise<void> } | { ok: false; code: string; message: string; retainRig?: boolean }> }): Promise<InstantiateOutcome> {
+  async instantiate(rigSpecYaml: string, rigRoot: string, opts?: { nonInterruptive?: boolean; cwdOverride?: string; env?: SeatEnv; installRoot?: string; force?: boolean; recordCreated?: RecordCreated; prelaunchHook?: (rigId: string, replacedRigIds: readonly string[]) => Promise<{ ok: true; rollback?: () => Promise<void> } | { ok: false; code: string; message: string; retainRig?: boolean }> }): Promise<InstantiateOutcome> {
     // #141: while an import may archive a stopped same-name generation, allow one import per rig name at
     // a time on this daemon. Otherwise two imports could each replace it, or one could archive the other's
     // in-progress replacement. Unrelated names are unaffected; an adapter that cannot probe keeps today's
@@ -1320,7 +1408,7 @@ export class PodRigInstantiator {
     }
   }
 
-  private async instantiateOnce(rigSpecYaml: string, rigRoot: string, opts?: { nonInterruptive?: boolean; cwdOverride?: string; env?: SeatEnv; installRoot?: string; force?: boolean; prelaunchHook?: (rigId: string, replacedRigIds: readonly string[]) => Promise<{ ok: true; rollback?: () => Promise<void> } | { ok: false; code: string; message: string; retainRig?: boolean }> }): Promise<InstantiateOutcome> {
+  private async instantiateOnce(rigSpecYaml: string, rigRoot: string, opts?: { nonInterruptive?: boolean; cwdOverride?: string; env?: SeatEnv; installRoot?: string; force?: boolean; recordCreated?: RecordCreated; prelaunchHook?: (rigId: string, replacedRigIds: readonly string[]) => Promise<{ ok: true; rollback?: () => Promise<void> } | { ok: false; code: string; message: string; retainRig?: boolean }> }): Promise<InstantiateOutcome> {
     // 1. Parse + validate
     let rigSpec: PodRigSpec;
     try {
@@ -1400,7 +1488,9 @@ export class PodRigInstantiator {
             if (makeRunningSessionCounter(this.db)(id) > 0 || !this.deps.rigRepo.archiveRig(id)) throw new GenerationChanged(rigSpec.name);
           }
         }
-        return this.deps.rigRepo.createRig(rigSpec.name, opts?.installRoot);
+        const rig = this.deps.rigRepo.createRig(rigSpec.name, opts?.installRoot);
+        opts?.recordCreated?.(rig.id);
+        return rig;
       });
       const rig = create();
       rigId = rig.id;
@@ -1525,7 +1615,7 @@ export class PodRigInstantiator {
         // Terminal fast-path: skip agent resolution and profile resolution
         if (member.agentRef === "builtin:terminal") {
           const termResult = await this.processTerminalMember(
-            rigId, rigSpec, rigRoot, pod, member, podId, qualifiedId, nodeIdMap, launchedSessionNames, podInstantiateWarnings, opts?.cwdOverride, opts?.env,
+            rigId, rigSpec, rigRoot, pod, member, podId, qualifiedId, nodeIdMap, launchedSessionNames, podInstantiateWarnings, opts?.cwdOverride, opts?.env, opts?.recordCreated,
           );
           nodeResults.push(termResult);
           continue;
@@ -1593,6 +1683,7 @@ export class PodRigInstantiator {
             resolvedSpecName: configResult.config.resolvedSpecName,
             resolvedSpecVersion: configResult.config.resolvedSpecVersion,
             resolvedSpecHash: configResult.config.resolvedSpecHash,
+            launchRecipe: { version: 1, rigRoot, rigSpec },
           });
           // Guard multi-seat correction (16e853a7): node creation + required provenance
           // are ONE ATOMIC UNIT (SQLite savepoint). A setter fault rolls the INSERT back
@@ -1602,6 +1693,7 @@ export class PodRigInstantiator {
           // null, and resolveRestorePosture fell through to rig full_bypass.)
           const bootstrapAttachment = this.resolveMemberPolicyAttachment(member.permissionPolicy, rigSpec.permissionPolicy, rigRoot);
           if (bootstrapAttachment) this.persistNodePolicyProvenanceStrict(node.id, bootstrapAttachment);
+          opts?.recordCreated?.(rigId, node.id);
           return node.id;
         });
         let nodeId: string;
@@ -1863,25 +1955,29 @@ export class PodRigInstantiator {
     warnings: string[],
     cwdOverride?: string,
     envOverride?: SeatEnv,
+    recordCreated?: RecordCreated,
   ): Promise<{ logicalId: string; status: "launched" | "failed"; code?: string; error?: string }> {
     const effectiveCwd = resolveLaunchCwd(member.cwd, rigRoot, cwdOverride);
     // Create node with sentinel values
     let nodeId: string;
     try {
-      const node = this.deps.rigRepo.addNode(rigId, qualifiedId, {
-        runtime: member.runtime,
-        model: member.model,
-        effort: member.effort,
-        advisor: member.advisor,
-        env: member.env,
-        cwd: effectiveCwd,
-        restorePolicy: "checkpoint_only",
-        podId,
-        agentRef: member.agentRef,
-        profile: member.profile,
-        label: member.label,
-      });
-      nodeId = node.id;
+      nodeId = this.db.transaction(() => {
+        const node = this.deps.rigRepo.addNode(rigId, qualifiedId, {
+          runtime: member.runtime,
+          model: member.model,
+          effort: member.effort,
+          advisor: member.advisor,
+          env: member.env,
+          cwd: effectiveCwd,
+          restorePolicy: "checkpoint_only",
+          podId,
+          agentRef: member.agentRef,
+          profile: member.profile,
+          label: member.label,
+        });
+        recordCreated?.(rigId, node.id);
+        return node.id;
+      })();
       nodeIdMap[qualifiedId] = nodeId;
     } catch (err) {
       return { logicalId: qualifiedId, status: "failed", error: (err as Error).message };
@@ -1938,6 +2034,7 @@ export class PodRigInstantiator {
     member: RigSpecPodMember;
     podId: string;
     rigRoot: string;
+    rigSpec: PodRigSpec;
     cwdOverride?: string;
   }) {
     const effectiveCwd = resolveLaunchCwd(input.member.cwd, input.rigRoot, input.cwdOverride);
@@ -1972,6 +2069,7 @@ export class PodRigInstantiator {
       agentRef: input.member.agentRef,
       profile: input.member.profile,
       label: input.member.label,
+      launchRecipe: { version: 1, rigRoot: input.rigRoot, rigSpec: input.rigSpec },
     });
     const event = this.deps.eventBus.persistWithinTransaction({
       type: "node.added",
@@ -1980,6 +2078,20 @@ export class PodRigInstantiator {
       logicalId: input.qualifiedId,
     });
     return { node, event };
+  }
+
+  private launchValidatedMember(input: {
+    rigId: string;
+    rigSpec: PodRigSpec;
+    rigRoot: string;
+    pod: RigSpecPod;
+    member: RigSpecPodMember;
+    qualifiedId: string;
+    nodeId: string;
+    cwdOverride?: string;
+    envOverride?: SeatEnv;
+  }) {
+    return this.launchBinding(input);
   }
 
   /**
@@ -2006,6 +2118,80 @@ export class PodRigInstantiator {
     return input.member.agentRef === "builtin:terminal"
       ? this.launchExistingTerminalMember(input)
       : this.launchExistingAgentMember(input);
+  }
+
+  /**
+   * Rebuild a fresh pod-aware launch from the source captured at materialization.
+   * A missing startup context means the daemon has no restorable startup
+   * context for this seat; it does not by itself prove that no conversation
+   * exists. It must not prevent a new harness from being started for a seat
+   * whose validated launch recipe is available.
+   */
+  async launchPersistedFresh(
+    rigId: string,
+    nodeId: string,
+  ): Promise<{ status: "launched" | "failed" | "attention_required"; error?: string; evidence?: string; sessionName?: string; warnings?: string[] }> {
+    const rig = this.deps.rigRepo.getRig(rigId);
+    const node = rig?.nodes.find((candidate) => candidate.id === nodeId);
+    if (!rig || !node) {
+      return { status: "failed", error: `Node "${nodeId}" not found in rig "${rigId}".` };
+    }
+
+    const recipe = this.deps.rigRepo.getNodeLaunchRecipe(nodeId);
+    if (!recipe) {
+      return {
+        status: "attention_required",
+        error: `Fresh launch recipe unavailable for ${node.logicalId}; rematerialize the pod-aware rig before launching this seat.`,
+      };
+    }
+
+    const context = this.findMemberContext(recipe.rigSpec, node.logicalId);
+    if (!context) {
+      return {
+        status: "attention_required",
+        error: `Fresh launch recipe for ${node.logicalId} does not contain its member definition.`,
+      };
+    }
+
+    // The recipe supplies the authored source, while the retained node row is the
+    // latest operator choice. Keep those choices authoritative across a restart.
+    const member = {
+      ...context.member,
+      ...(node.model !== null ? { model: node.model } : {}),
+      ...(node.effort !== null && node.effort !== undefined ? { effort: node.effort } : {}),
+      ...(node.codexConfigProfile !== null && node.codexConfigProfile !== undefined
+        ? { codexConfigProfile: node.codexConfigProfile }
+        : {}),
+      ...(node.permissionPolicy !== null && node.permissionPolicy !== undefined
+        ? { permissionPolicy: node.permissionPolicy }
+        : {}),
+      ...(node.env !== null && node.env !== undefined ? { env: node.env } : {}),
+      ...(node.cwd !== null ? { cwd: node.cwd } : {}),
+      ...(node.restorePolicy !== null ? { restorePolicy: node.restorePolicy } : {}),
+      ...(node.sessionSource !== null && node.sessionSource !== undefined ? { sessionSource: node.sessionSource } : {}),
+    };
+
+    return this.launchValidatedMember({
+      rigId,
+      rigSpec: recipe.rigSpec,
+      rigRoot: recipe.rigRoot,
+      pod: context.pod,
+      member,
+      qualifiedId: node.logicalId,
+      nodeId,
+      // Preserve the resolved cwd from materialization, including a prior
+      // --cwd-override, rather than silently falling back to process cwd.
+      cwdOverride: node.cwd ?? undefined,
+    });
+  }
+
+  /** Whether a persisted recipe contains enough validated source to attempt a fresh launch. */
+  canLaunchPersistedFresh(rigId: string, nodeId: string): boolean {
+    const rig = this.deps.rigRepo.getRig(rigId);
+    const node = rig?.nodes.find((candidate) => candidate.id === nodeId);
+    if (!rig || !node) return false;
+    const recipe = this.deps.rigRepo.getNodeLaunchRecipe(nodeId);
+    return recipe ? this.findMemberContext(recipe.rigSpec, node.logicalId) !== null : false;
   }
 
   /**
@@ -2932,7 +3118,7 @@ export class PodRigInstantiator {
       if (f.deliveryHint !== "auto") return f;
       try {
         const content = this.deps.fsOps.readFile(f.absolutePath);
-        return { ...f, deliveryHint: resolveConcreteHint(f.path, content) };
+        return { ...f, deliveryHint: resolveConcreteHint(f.path, content, f.orientation) };
       } catch {
         // If file can't be read, default to send_text (safest — delivered after harness ready)
         return { ...f, deliveryHint: "send_text" as const };

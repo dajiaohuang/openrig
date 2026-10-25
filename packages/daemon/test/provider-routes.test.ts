@@ -43,11 +43,12 @@ function appWith(svc: ProviderService | null): Hono {
 }
 
 describe("provider routes", () => {
-  it("the subscription move record is gone: its routes answer 404, not a disabled-feature 409", async () => {
+  it("move reports are queue items now, not the removed event-log record: no setting gates them, and there's no /moves/:id", async () => {
     const app = appWith(stubService);
-    expect((await app.request("/api/provider/moves")).status).toBe(404);
+    // This app wires no queue, so the report routes say so rather than answering a disabled-feature 409.
+    expect((await app.request("/api/provider/moves")).status).toBe(503);
+    expect((await app.request("/api/provider/moves", { method: "POST", body: "{}" })).status).toBe(503);
     expect((await app.request("/api/provider/moves/m-1")).status).toBe(404);
-    expect((await app.request("/api/provider/moves", { method: "POST", body: "{}" })).status).toBe(404);
   });
 
   it("GET /status returns the whole four-block model", async () => {
@@ -97,6 +98,21 @@ describe("provider routes", () => {
   it("precheck requires seat and toAccount (400 when missing)", async () => {
     const res = await appWith(stubService).request("/api/provider/precheck?seat=s1");
     expect(res.status).toBe(400);
+  });
+
+  it("precheck and switch lend the service the seat's in-place restart, so both act on the home the seat runs on", async () => {
+    const lent: unknown[] = [];
+    const app = appWith({
+      ...stubService,
+      precheck: async (_input, seatRestart) => { lent.push(seatRestart); return { safe: true }; },
+      switchAccount: async (_input, seatRestart) => { lent.push(seatRestart); return { outcome: "rebind_in_progress" }; },
+    });
+    expect((await app.request("/api/provider/precheck?seat=s1&toAccount=work")).status).toBe(200);
+    expect((await app.request("/api/provider/switch", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ seat: "s1", toAccount: "work" }),
+    })).status).toBe(200);
+    expect(lent).toHaveLength(2);
+    for (const seatRestart of lent) expect(seatRestart).toMatchObject({ plan: expect.any(Function), run: expect.any(Function) });
   });
 
   it("switch business outcomes are 200 payloads, not transport errors (failed_safely = 200)", async () => {

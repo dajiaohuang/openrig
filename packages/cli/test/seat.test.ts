@@ -94,6 +94,13 @@ const STATUS = {
 };
 
 describe("seat typing guard commands", () => {
+  it("prints the daemon's managed restore delivery failure", async () => {
+    const detail = "OpenRig owes its turn boundary. Last delivery: target_activity_unknown; no_activity_signal.";
+    const deps = makeDeps({ status: 200, data: { ...STATUS, compaction: { stage: "compacting", detail } } }, []);
+    const result = await captureLogs(() => makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "worker@test"]).then(() => undefined));
+    expect(result.logs).toContain(`Managed compaction (compacting): ${detail}`);
+  });
+
   it("keeps the legacy on prefix when status reports hold", async () => {
     const paths: string[] = [];
     const deps = makeDeps({ status: 200, data: { ...STATUS, typingGuard: { desired: true, effective: true, effectiveMode: "hold", pending: false, heldCount: 0 } } }, paths);
@@ -314,6 +321,46 @@ describe("rig seat status", () => {
     expect(output).toContain("Continuity outcome: unverified");
     expect(output).toContain("Handover result: none");
     expect(output).toContain("Previous occupant: none");
+  });
+
+  it("prints the planned permission account as planned, with its unknowns and the controls, in place of the old mode line", async () => {
+    const account = {
+      summary: "Next launch: --permission-mode acceptEdits, from OpenRig's team default (no policy or seat choice is recorded); OpenRig adds 2 allowances and asks before 1 lifecycle commands.",
+      overrides: [], unknown: ["Whether the harness applies this is unverified until a launch."],
+      openRigAdds: { claudeAllow: ["Read(./**)", "Bash(rig:*)"], claudeAsk: ["Bash(rig up:*)"], notes: ["A hook asks before the listed lifecycle commands."] },
+      controls: ['rig seat set-permissions dev-impl@seat-rig --mode <mode> --reason "<why>"'],
+    };
+    const deps = makeDeps({ status: 200, data: { ...STATUS, permissions: { selectionState: "inherit", desired: null, lastLaunchArguments: { value: "--permission-mode acceptEdits" }, nativeEffect: "unverified", account } } }, []);
+
+    const { logs } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]);
+    });
+
+    const output = logs.join("\n");
+    expect(output).toContain("Permissions, planned for the next fresh managed launch (not observed):");
+    expect(output).toContain(`  ${account.summary}`);
+    expect(output).toContain("  The exact allowance and ask lists are in --json, under permissions.account.openRigAdds.");
+    expect(output).toContain("  Last launch arguments (observed): --permission-mode acceptEdits");
+    expect(output).toContain("  Unknown: Whether the harness applies this is unverified until a launch.");
+    expect(output).toContain('    rig seat set-permissions dev-impl@seat-rig --mode <mode> --reason "<why>"');
+    expect(output).not.toContain("Permission mode for future launches");
+  });
+
+  it("prints each advisory the account carries, after the summary", async () => {
+    const advisory = 'Claude Code answers plan-mode turns with Sonnet when the model is the alias "haiku". To keep Haiku, set a full Haiku model id: '
+      + 'rig seat set-model dev-impl@seat-rig --model <full Haiku id> --reason "<why>".';
+    const account = { summary: "Next launch: --permission-mode plan, from this seat's own choice (person@host: careful review).",
+      overrides: [], unknown: [], openRigAdds: { claudeAllow: [], claudeAsk: [], notes: [] }, controls: [], advisories: [advisory] };
+    const deps = makeDeps({ status: 200, data: { ...STATUS, permissions: { selectionState: "explicit", desired: null, lastLaunchArguments: null, nativeEffect: "unverified", account } } }, []);
+
+    const { logs } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "status", "dev-impl@seat-rig"]);
+    });
+
+    const lines = logs.join("\n").split("\n");
+    const summaryAt = lines.indexOf(`  ${account.summary}`);
+    expect(summaryAt).toBeGreaterThan(-1);
+    expect(lines[summaryAt + 1]).toBe(`  ${advisory}`);
   });
 
   it("explains a confirmed missing tmux session", async () => {

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { classifyPaneActivity, SessionTransport } from "../src/domain/session-transport.js";
 import { SeatStructuralActivityService } from "../src/domain/seat-structural-activity-service.js";
@@ -75,6 +75,13 @@ describe("Claude composer below noninteractive status warnings", () => {
     expect(classifyPaneActivity(content).state).not.toBe("agent_idle");
     const service = new SeatStructuralActivityService({ capturePaneContent: async () => content });
     expect((await service.pollSeat("seat@rig"))?.state).not.toBe("agent_idle");
+  });
+
+  it("keeps a multiline draft with an empty first line out of idle", async () => {
+    const content = pane([], "❯ \n  second line of draft");
+    expect(classifyPaneActivity(content, { runtime: "claude-code" }).state).toBe("unknown");
+    const service = new SeatStructuralActivityService({ capturePaneContent: async () => content });
+    expect((await service.pollSeat("seat@rig"))?.state).toBe("unknown");
   });
 
   it("does not confuse completed prompt history with a current draft", () => {
@@ -275,7 +282,10 @@ describe("#808: Claude permission-mode footers below status warnings", () => {
 
 describe("first guarded Claude send with retained warning-shaped composer", () => {
   let db: Database.Database | undefined;
-  afterEach(() => { db?.close(); db = undefined; });
+  // These cases test readiness, not capture speed. Only the poll/paste sleep advances
+  // the deadline and its race timer, so runner load cannot discard a valid observation.
+  beforeEach(() => { vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] }); });
+  afterEach(() => { vi.useRealTimers(); db?.close(); db = undefined; });
 
   function setup(content: string, event = "SessionStart", ageMs = 16_000, priorGeneration = false) {
     db = createFullTestDb();
@@ -315,7 +325,7 @@ describe("first guarded Claude send with retained warning-shaped composer", () =
       sendText, sendKeys,
     } as unknown as TmuxAdapter;
     const transport = new SessionTransport({ db, rigRepo: repo, sessionRegistry: registry,
-      tmuxAdapter: tmux, agentActivityStore: store, now: () => now, sleep: async () => undefined, waitForIdlePollMs: 1 });
+      tmuxAdapter: tmux, agentActivityStore: store, now: () => now, sleep: async ms => { await vi.advanceTimersByTimeAsync(ms); }, waitForIdlePollMs: 1 });
     return { transport, store, name, sendText, sendKeys };
   }
 

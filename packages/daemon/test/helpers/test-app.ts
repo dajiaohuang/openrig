@@ -1,4 +1,8 @@
+import { claudeTokenReadingsSchema } from "../../src/db/migrations/134_claude_token_readings.js";
+import { terminalPolicySchema } from "../../src/db/migrations/128_terminal_policy.js";
+import { seatRuntimeSwitchesSchema } from "../../src/db/migrations/132_seat_runtime_switches.js";
 import { seatIdentityPanePidSchema } from "../../src/db/migrations/119_seat_identity_pane_pid.js";
+import { seatIdentityProcessEvidenceSchema } from "../../src/db/migrations/135_seat_identity_process_evidence.js";
 import { rigStartupLayersSchema } from "../../src/db/migrations/121_rig_startup_layers.js";
 import { humanOperatingModesSchema } from "../../src/db/migrations/122_human_operating_modes.js";
 import { queueDelegatedDecisionSchema } from "../../src/db/migrations/123_queue_delegated_decision.js";
@@ -8,12 +12,14 @@ import { queueTransitionsQitemIdOrderSchema } from "../../src/db/migrations/098_
 import { queueItemsRecoveryTagsSchema } from "../../src/db/migrations/099_queue_items_recovery_tags.js";
 import { resumeRotationSchema } from "../../src/db/migrations/101_claude_resume_rotation.js";
 import { nodeAdvisorSchema } from "../../src/db/migrations/125_node_advisor.js";
+import { operationCorrelationSchema } from "../../src/db/migrations/127_operation_correlation.js";
 import { sessionStopIntentSchema } from "../../src/db/migrations/103_session_stop_intent.js";
 import { nodeEffortChoiceSchema } from "../../src/db/migrations/104_node_effort_choice.js";
 import { seatEnvSchema } from "../../src/db/migrations/111_seat_env.js";
 import { appliedLaunchDaemonOptOutSchema } from "../../src/db/migrations/113_applied_launch_daemon_opt_out.js";
 import { sessionAgentAppSchema as sessionCommunityHarnessSchema } from "../../src/db/migrations/114_session_agent_app.js";
 import { threadSeatMapChannelKeySchema } from "../../src/db/migrations/115_thread_seat_map_channel_key.js";
+import { nodeLaunchRecipeSchema } from "../../src/db/migrations/136_node_launch_recipe.js";
 import { queueItemWakeInputBoxSchema } from "../../src/db/migrations/116_queue_item_wake_input_box.js";
 import { providerAccountReadingsSchema } from "../../src/db/migrations/117_provider_account_readings.js";
 import { humanQuietWindowsSchema } from "../../src/db/migrations/118_human_quiet_windows.js";
@@ -140,7 +146,7 @@ import fs from "node:fs";
 
 /** Seam B R6: the canonical full-fixture migration list, exported so file-backed
  *  DB-reopen tests migrate IDENTICALLY to createFullTestDb. */
-export const migrationsForFullTestDb = [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, nodePermissionPolicySchema, rigPermissionPolicySchema, nodePolicyProvenanceSchema, rigPolicyProvenanceSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, rigPolicySchema, rigArchiveSchema, resumeProvenanceSchema, resumeVerificationSchema, seatIdentityVerdictsSchema, selfHostIdentitySchema, occupantTenuresSchema, daemonLifecycleSchema, watchdogJobsSchema, occupantGenerationStampsSchema, projectionManifestSchema, watchdogTargetGenerationSchema, appliedLaunchObservationsSchema, appliedLaunchObservationInvalidationsSchema, threadSeatMapSchema, queueTransitionWakesSchema, nodeSessionSourceSchema, scopedOperatingPostureSchema, humanNotificationIntentSchema, reviewReadIndexesSchema, inventoryEventIndexesSchema, rigClaudeManagedBlockFileSchema, nodePermissionSelectionsSchema, humanReplyToSchema, humanQuestionsSchema, nodeEffortSchema, rigNonInterruptiveSchema, rigInstallRootSchema, threadPartMapSchema, queueTransitionsQitemIdOrderSchema, queueItemsRecoveryTagsSchema, resumeRotationSchema, sessionStopIntentSchema, nodeEffortChoiceSchema, modePostureCoexistSchema, seatEnvSchema, appliedLaunchDaemonOptOutSchema, sessionCommunityHarnessSchema, threadSeatMapChannelKeySchema, queueItemWakeInputBoxSchema, providerAccountReadingsSchema, humanQuietWindowsSchema, seatIdentityPanePidSchema, rigStartupLayersSchema, humanOperatingModesSchema, queueDelegatedDecisionSchema, nodeAdvisorSchema];
+export const migrationsForFullTestDb = [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, nodePermissionPolicySchema, rigPermissionPolicySchema, nodePolicyProvenanceSchema, rigPolicyProvenanceSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, rigPolicySchema, rigArchiveSchema, resumeProvenanceSchema, resumeVerificationSchema, seatIdentityVerdictsSchema, selfHostIdentitySchema, occupantTenuresSchema, daemonLifecycleSchema, watchdogJobsSchema, occupantGenerationStampsSchema, projectionManifestSchema, watchdogTargetGenerationSchema, appliedLaunchObservationsSchema, appliedLaunchObservationInvalidationsSchema, threadSeatMapSchema, queueTransitionWakesSchema, nodeSessionSourceSchema, scopedOperatingPostureSchema, humanNotificationIntentSchema, reviewReadIndexesSchema, inventoryEventIndexesSchema, rigClaudeManagedBlockFileSchema, nodePermissionSelectionsSchema, humanReplyToSchema, humanQuestionsSchema, nodeEffortSchema, rigNonInterruptiveSchema, rigInstallRootSchema, threadPartMapSchema, queueTransitionsQitemIdOrderSchema, queueItemsRecoveryTagsSchema, resumeRotationSchema, sessionStopIntentSchema, nodeEffortChoiceSchema, modePostureCoexistSchema, seatEnvSchema, appliedLaunchDaemonOptOutSchema, sessionCommunityHarnessSchema, threadSeatMapChannelKeySchema, queueItemWakeInputBoxSchema, providerAccountReadingsSchema, humanQuietWindowsSchema, seatIdentityPanePidSchema, seatIdentityProcessEvidenceSchema, rigStartupLayersSchema, humanOperatingModesSchema, queueDelegatedDecisionSchema, nodeAdvisorSchema, operationCorrelationSchema, terminalPolicySchema, seatRuntimeSwitchesSchema, claudeTokenReadingsSchema, nodeLaunchRecipeSchema];
 
 /**
  * P24 — the DECLARED exclusions for {@link migrationsForFullTestDb}. That list is deliberately a
@@ -166,6 +172,10 @@ export const migrationsForFullTestDbExclusions: Record<string, string> = {
   "087_seat_delivery_guard.sql": "extends outbox_entries (027 is excluded); delivery-guard suites use ALL_MIGRATIONS. Revisit if a core-fixture consumer uses retained delivery.",
   "100_typing_guard_modes.sql": "extends outbox_entries and its typing guard (027 and 087 are excluded); guard-mode and retry suites use ALL_MIGRATIONS.",
   "089_classification_identity_provenance.sql": "extends project_classifications (028 is excluded); classifier fixtures migrate it inline.",
+  "129_stream_dispositions.sql": "companion of project_classifications (028 is excluded); stream-disposition suites migrate it inline.",
+  "130_stream_subscriptions.sql": "stream reader subscriptions and retention marks; stream suites migrate it inline.",
+  "131_stream_retention_floor.sql": "stream retention's pre-upgrade floor; stream suites migrate it inline.",
+  "133_stream_reader_actions.sql": "stream reader actions; stream suites migrate it inline.",
   "030_views_custom.sql": "custom-views subsystem table — views suites migrate it inline.",
   "032_watchdog_history.sql": "watchdog history table — watchdog suites migrate it inline (watchdog_jobs is the only watchdog base the core edge carries).",
   "033_workflow_specs.sql": "workflow subsystem table — workflow-* suites migrate the workflow schema inline.",
@@ -212,6 +222,7 @@ export function createFullTestDb(): Database.Database {
 
 export function mockTmuxAdapter(): TmuxAdapter {
   return mockShellCommand({
+    startServer: vi.fn(async () => {}),
     createSession: vi.fn(async () => ({ ok: true as const })),
     killSession: vi.fn(async () => ({ ok: true as const })),
     listSessions: vi.fn(async () => []),
@@ -289,6 +300,13 @@ export function createTestApp(
      *  (defaults to daemon-shipped assets). Tests inject fixtures to exercise the nonfatal
      *  delivery-gap warning through the real /api/up route. */
     claudeActivityAssets?: { relayPath?: string; manifestPath?: string };
+    /** Optional persisted fresh-launch callbacks for restore-to-instantiator integration tests. */
+    freshLaunch?: (rigId: string, nodeId: string) => Promise<{
+      status: "launched" | "failed" | "attention_required";
+      error?: string;
+      warnings?: string[];
+    }>;
+    freshLaunchAvailable?: (rigId: string, nodeId: string) => boolean;
     /** Wire the ready runtime adapters into the routes' `runtimeAdapters`, as startup does, so a
      *  route launch can start harnesses. Off by default: existing tests keep no route adapters. */
     wireRuntimeAdapters?: boolean;
@@ -323,6 +341,8 @@ export function createTestApp(
     db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture,
     checkpointStore, nodeLauncher, tmuxAdapter: tmux, claudeResume, codexResume,
     ...(opts?.listProcesses ? { listProcesses: opts.listProcesses } : {}),
+    ...(opts?.freshLaunch ? { freshLaunch: opts.freshLaunch } : {}),
+    ...(opts?.freshLaunchAvailable ? { freshLaunchAvailable: opts.freshLaunchAvailable } : {}),
   });
   const podRepo = new PodRepository(db);
   const rigSpecExporter = new RigSpecExporter({ rigRepo, sessionRegistry, podRepo });

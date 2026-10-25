@@ -417,9 +417,12 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
       return captureKind === "empty" ? "" : "unrecognized provider content";
     };
     const transport = makeTransport(mockTmux({ capturePaneContent: capture, sendText, sendKeys }), { now: () => fixedNow });
-    expect(await transport.send(seat, "follow up", { force: true })).toMatchObject({
+    const refused = await transport.send(seat, "follow up", { force: true });
+    expect(refused).toMatchObject({
       ok: false, reason: "target_needs_input", activity: { reason: "permission_request_unverified" },
     });
+    // Only the retained request says so: the refusal names the way out for a prompt that's gone.
+    expect(refused.error).toContain(`rig seat clear-attention ${seat} --reason "<what you saw>"`);
     expect(sendText).not.toHaveBeenCalled();
     expect(sendKeys).not.toHaveBeenCalled();
   });
@@ -604,6 +607,26 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     expect(r.error).toMatch(/^Refused: .* is at an interactive prompt \(permission_prompt; latest hook, pane unrecognized\)/);
     expect(sendText).not.toHaveBeenCalled();
     expect(sendKeys).not.toHaveBeenCalled();
+  });
+
+  it("a prompt declined with no hook after it: the refusal says how to clear it, and once cleared the send goes", async () => {
+    const fixedNow = new Date("2026-10-08T06:47:16.000Z");
+    // The activity poller's own record of the prompt it saw, ten minutes ago; nothing newer was recorded.
+    agentActivityStore.recordHookEvent({ runtime: "claude-code", sessionName: "dev-impl@my-rig", hookEvent: "PermissionPromptConfirmed",
+      occurredAt: new Date(fixedNow.getTime() - 600_000).toISOString() });
+    const { sendText } = spies();
+    const t = makeTransport(mockTmux({ capturePaneContent: async () => UNRECOGNIZED_PANE, sendText }), { now: () => fixedNow });
+    const refused = await t.send("dev-impl@my-rig", "hi");
+    expect(refused).toMatchObject({ ok: false, reason: "target_needs_input" });
+    expect(refused.error).toContain("(PermissionPromptConfirmed; latest hook, pane unrecognized)");
+    expect(refused.error).toContain(`Look first: rig capture dev-impl@my-rig. If that prompt is gone (declined or answered), clear it: rig seat clear-attention dev-impl@my-rig --reason "<what you saw>".`);
+    expect(sendText).not.toHaveBeenCalled();
+    // What clear-attention --reason records: the prompt cleared, after the hook that named it.
+    agentActivityStore.recordHookEvent({ runtime: "claude-code", sessionName: "dev-impl@my-rig", hookEvent: "PermissionPromptCleared",
+      occurredAt: new Date(fixedNow.getTime() - 5_000).toISOString() });
+    const sent = await t.send("dev-impl@my-rig", "hi");
+    expect(sent.ok).toBe(true);
+    expect(sendText).toHaveBeenCalled();
   });
 
   it("a stale permission_prompt hook + a recognized empty composer sends (no new refusal at an idle prompt)", async () => {
@@ -835,6 +858,74 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
     expect(r.warning).toContain("seat-env UNKNOWN — OPENRIG_RUNTIME absent from the tmux session environment");
     expect(r.warning).not.toContain("relay URL,");
     expect(sendText).toHaveBeenCalled();
+  });
+
+  describe("one session-environment listing per producer diagnosis", () => {
+    const names = ["OPENRIG_URL", "RIGGED_URL", "OPENRIG_PORT", "RIGGED_PORT", "OPENRIG_ACTIVITY_HOOK_TOKEN", "RIGGED_ACTIVITY_HOOK_TOKEN", "OPENRIG_RUNTIME", "RIGGED_RUNTIME"];
+    const all = (value: boolean | null) => Object.fromEntries(names.map((n) => [n, value]));
+    function withBatch(batch: (session: string, wanted: readonly string[]) => Promise<Record<string, boolean | null>>, overrides?: Parameters<typeof mockTmux>[0]) {
+      const { sendText } = spies();
+      const hasSessionEnvBatch = vi.fn(batch), hasSessionEnv = vi.fn(async () => true);
+      const tmux = Object.assign({}, mockTmux({ capturePaneContent: async () => "xyzzy no prompt here", sendText, ...overrides }), { hasSessionEnvBatch, hasSessionEnv }) as unknown as TmuxAdapter;
+      return { sendText, hasSessionEnvBatch, hasSessionEnv, tmux };
+    }
+
+    it("reads all eight names in one listing per send, freshly for each send, for an unknown Claude seat", async () => {
+      const b = withBatch(vi.fn().mockResolvedValueOnce(all(false)).mockResolvedValueOnce(all(true)));
+      const t = makeTransport(b.tmux);
+      const first = await t.send("dev-impl@my-rig", "hi");
+      expect(first.ok).toBe(true);
+      expect(first.warning).toContain("seat-env UNKNOWN — relay URL, activity token, OPENRIG_RUNTIME absent from the tmux session environment");
+      const second = await t.send("dev-impl@my-rig", "hi");
+      expect(second.ok).toBe(true);
+      expect(second.warning).toContain("no activity hook is stored for this seat");
+      expect(second.warning).not.toContain("seat-env");
+      expect(b.hasSessionEnvBatch).toHaveBeenCalledTimes(2);
+      expect(b.hasSessionEnvBatch).toHaveBeenNthCalledWith(1, "dev-impl@my-rig", names);
+      expect(b.hasSessionEnv).not.toHaveBeenCalled();
+      expect(b.sendText).toHaveBeenCalledTimes(2);
+    });
+
+    it("keeps a failed listing unknown, once, with no name-by-name retry and no error text", async () => {
+      const b = withBatch(async () => { throw new Error("lookup failed: token=sk-private-value"); });
+      const r = await makeTransport(b.tmux).send("dev-impl@my-rig", "hi");
+      expect(r.ok).toBe(true);
+      expect(r.warning).toContain("session-environment lookup failed for relay URL, activity token, OPENRIG_RUNTIME");
+      expect(r.warning).not.toContain("absent from the tmux session environment");
+      expect(r.warning).not.toContain("sk-private");
+      expect(b.hasSessionEnvBatch).toHaveBeenCalledTimes(1);
+      expect(b.hasSessionEnv).not.toHaveBeenCalled();
+    });
+
+    it("lets any present alias win, and keeps a missing or unknown entry unknown rather than absent", async () => {
+      const b = withBatch(async () => ({ OPENRIG_URL: null, RIGGED_URL: false, OPENRIG_PORT: false, RIGGED_PORT: true,
+        OPENRIG_ACTIVITY_HOOK_TOKEN: null, RIGGED_ACTIVITY_HOOK_TOKEN: false, OPENRIG_RUNTIME: false }));
+      const r = await makeTransport(b.tmux).send("dev-impl@my-rig", "hi");
+      // The URL is covered by a present alias: only the token and runtime are unread, and nothing is called absent.
+      expect(r.warning).toContain("seat-env UNKNOWN — session-environment lookup failed for activity token, OPENRIG_RUNTIME;");
+      expect(r.warning).not.toContain("absent from the tmux session environment");
+    });
+
+    it("keeps the endpoint file's cover for the URL and token, and gives an unknown Codex seat the same one read", async () => {
+      const seat = seedCodexSeat();
+      const b = withBatch(async () => all(false));
+      const r = await makeTransport(b.tmux, { activityEndpointFile: () => ({ baseUrl: "http://127.0.0.1:1", token: "file-token-value" }) }).send(seat, "hi");
+      expect(r.ok).toBe(true);
+      // The endpoint file covers the URL and token, never the runtime.
+      expect(r.warning).toContain("seat-env UNKNOWN — OPENRIG_RUNTIME absent from the tmux session environment;");
+      expect(r.warning).not.toContain("file-token-value");
+      expect(b.hasSessionEnvBatch).toHaveBeenCalledTimes(1);
+    });
+
+    it("does no environment read when a fresh hook shows a prompt: refused before any input", async () => {
+      agentActivityStore.recordHookEvent({ runtime: "claude-code", sessionName: "dev-impl@my-rig", hookEvent: "Notification", subtype: "permission_prompt" });
+      const b = withBatch(async () => all(true), { capturePaneContent: async () => "❯ \n  ⏵⏵ accept edits on" });
+      const r = await makeTransport(b.tmux).send("dev-impl@my-rig", "hi");
+      expect(r.ok).toBe(false);
+      expect(r.reason).toBe("target_needs_input");
+      expect(b.hasSessionEnvBatch).not.toHaveBeenCalled();
+      expect(b.sendText).not.toHaveBeenCalled();
+    });
   });
 
   describe("B1: a hook's age is checked before it is called recent; its generation verdict is kept", () => {

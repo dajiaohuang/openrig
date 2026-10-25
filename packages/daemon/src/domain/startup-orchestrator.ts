@@ -1,4 +1,5 @@
 import { nonInterruptiveNotice } from "../adapters/non-interruptive.js";
+import { planModelAliasNotice } from "../adapters/yolo-mode.js";
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { SessionRegistry } from "./session-registry.js";
@@ -8,7 +9,7 @@ import { isClaudeResumeType } from "../adapters/claude-resume.js";
 import type { StartupAction, StartupProofSelection, StartupFailureStage } from "./types.js";
 import type {
   RuntimeAdapter, NodeBinding, ResolvedStartupFile,
-  ProjectionResult, StartupDeliveryResult, ForkSource,
+  ProjectionResult, StartupDeliveryResult, ForkSource, ReadinessResult,
 } from "./runtime-adapter.js";
 import { isAttentionRequiredReadinessCode, resolveConcreteHint } from "./runtime-adapter.js";
 import type { ProjectionPlan } from "./projection-planner.js";
@@ -26,8 +27,8 @@ import { shellQuote } from "../adapters/shell-quote.js";
 import { observeClaudeResumeLaunch, type ClaudeLaunchedProcess, type NativeProcessLister } from "./native-process-lineage.js";
 import { CommunityHarnessRuntimeAdapter } from "../adapters/community-harness-runtime-adapter.js";
 import { join } from "node:path";
-import { readFootprintAnswer, routerLineSkipReason, type FootprintAnswer, type RouterLineWriteResult } from "./footprint-choice.js";
-import { describeSkillRouterFootprint, refusedSeatSkillsRootForNode, seatCatalogKeptNote, seatRouterKeptNote, seatSkillPathsForNode, seatSkillPluginDirForNode, writeSeatSkillCatalog, writeSeatSkillRouter } from "./seat-skill-storage.js";
+import { guidanceFileIsLink, readFootprintAnswer, readGuidanceFile, routerLineSkipReason, type FootprintAnswer, type RouterLineWriteResult } from "./footprint-choice.js";
+import { SEAT_SKILLS_BOOTSTRAP_BLOCK_ID, describeSkillRouterFootprint, seatSkillsLineEdited, refusedSeatSkillsRootForNode, seatCatalogKeptNote, seatRouterKeptNote, seatSkillPathsForNode, seatSkillPluginDirForNode, writeSeatSkillCatalog, writeSeatSkillRouter } from "./seat-skill-storage.js";
 import { recordConversationPromptForNode, recordForkConversationPromptForNode, seatLaunchAdditionsForLaunch, systemPromptPendingNoteForNode } from "./seat-launch-additions.js";
 
 // Expanded startup text can put the current input marker above 50 scrollback lines.
@@ -164,10 +165,12 @@ export function isRecoverableStartupFailure(db: Database.Database, nodeId: strin
 /** The seat-skills bootstrap line among a seat's startup files: the built-in guidance merged into its managed block
  *  (never the Codex catalog, which shares the logical name but is sent as text). */
 export function isSeatSkillsBootstrapLine(file: Pick<ResolvedStartupFile, "path" | "deliveryHint">): boolean {
-  return file.path === "openrig-seat-skills.md" && file.deliveryHint === "guidance_merge";
+  return file.path === SEAT_SKILLS_BOOTSTRAP_BLOCK_ID && file.deliveryHint === "guidance_merge";
 }
 
 export interface StartupInput {
+  /** Internal attempt state: a launch input may already have reached the harness, so it cannot be replayed. */
+  firstInputPassed?: boolean;
   rigId: string;
   nodeId: string;
   sessionId: string;
@@ -228,6 +231,14 @@ type StartupDeliveryInput = StartupInput & {
   lastSubmissionConfirmed?: boolean;
   /** Claude only: why the latest interactive send was not confirmed, in words for the operator. */
   lastSubmissionUnconfirmedReason?: string;
+  /** Claude only: the runtime refused an earlier startup turn (an expired login, say), so later inputs are held. */
+  refusedTurn?: ReadinessResult;
+  /** A later input was pasted before the refusal appeared; its submission is uncertain, so never replay it. */
+  refusedWithStagedInput?: boolean;
+  /** How many startup inputs were held after that refusal, and so are still owed. */
+  heldInputs?: number;
+  /** A one-shot (non-idempotent) startup action was typed, so the startup must not be delivered again as a whole. */
+  oneShotSent?: boolean;
 };
 
 export type StartupResult = { warnings?: string[] } & (
@@ -376,6 +387,7 @@ export class StartupOrchestrator {
       for (const reason of refused) warnings.push(`${input.sessionName ?? input.nodeId}: seat_launch_addition_refused: ${reason}; launched without it`);
     }
     const deliveryInput: StartupDeliveryInput = { ...input, warnings, submissionWarnings: [], startupAttemptId: randomUUID(), sendOrder: 0, submissionDiagnostics: [] };
+    const startupAssisted = input.adapter instanceof CommunityHarnessRuntimeAdapter && input.adapter.startupAssisted();
     const errors: string[] = [];
     let continuityOutcome: "resumed" | "fresh" | "forked" | "rebuilt" = input.resumeToken
       ? "resumed"
@@ -447,7 +459,7 @@ export class StartupOrchestrator {
     let postLaunchFiles: ResolvedStartupFile[] = [];
     for (const f of applicableFiles) {
       const hint = f.deliveryHint === "auto"
-        ? resolveConcreteHint(f.path, this.safeReadFile(f.absolutePath))
+        ? resolveConcreteHint(f.path, this.safeReadFile(f.absolutePath), f.orientation)
         : f.deliveryHint;
       if (hint === "send_text") {
         postLaunchFiles.push(f);
@@ -484,7 +496,15 @@ export class StartupOrchestrator {
       if (target) {
         const skip = routerLineSkipReason(answer);
         if (skip) routerLine = { answer, files: [{ path: target, outcome: "skipped", reason: skip }] };
-        else {
+        else if (guidanceFileIsLink(target)) {
+          // A linked guidance file is someone's layout, often a file outside the project: the line isn't written through it.
+          routerLine = { answer, files: [{ path: target, outcome: "linked" }] };
+          warnings.push(`seat_skills_line_linked: ${target} is a link, so the line wasn't written through it; the seat started without it`);
+        } else if (seatSkillsLineEdited(readGuidanceFile(target))) {
+          // Someone edited the line: a start leaves their block as it is, as rig down does.
+          routerLine = { answer, files: [{ path: target, outcome: "edited" }] };
+          warnings.push(`seat_skills_line_edited: ${target} holds an edited seat-skills line, so this start left it as it is`);
+        } else {
           try {
             // The saved line is optional, and the adapters swallow an optional file's write error; for this one isolated
             // call, mark it required so the adapter reports the real error, which is handled here without failing the start.
@@ -534,6 +554,10 @@ export class StartupOrchestrator {
       return this.fail(input, "failed", [`Startup context persistence failed: ${String(error)}`], undefined, false, undefined, false, "persistence", true);
     }
 
+    const identityAction = this.extractSessionIdentityAction(input.startupActions, context);
+    let launchPrompt: { prompt: string; remainingFiles: ResolvedStartupFile[] } | undefined;
+    let launchChallenge: ReturnType<typeof issueStartupChallenge> | null = null;
+
     // 5. Launch harness (unless skipped for legacy nodes)
     // A community harness's seat: record the selection on this session before the app starts. It's provenance for
     // later reads (identity, activity, labels, restore), not launch success or identity proof.
@@ -554,11 +578,27 @@ export class StartupOrchestrator {
               this.sessionRegistry.recordResumeLaunch(input.sessionId, launchResumeToken ?? null);
             } catch { /* best-effort: without it a rotation stays unproved, as before */ }
           }
+          if (input.adapter instanceof CommunityHarnessRuntimeAdapter && input.adapter.firstInput()
+            && !launchResumeToken && continuityOutcome === "fresh" && identityAction) {
+            launchChallenge = startupProof.mode === "authenticated" ? issueStartupChallenge(this.eventBus, {
+              rigId: input.rigId, nodeId: input.nodeId, contractSource: JSON.stringify(input.resolvedStartupFiles),
+            }) : null;
+            launchPrompt = this.composeInitialSessionPrompt(deliveryInput, identityAction, postLaunchFiles,
+              launchChallenge?.promptBlock ?? null, input.includeDurableObligations);
+          }
           const launchResult = await input.adapter.launchHarness(input.binding, {
             name: input.sessionName ?? input.binding.tmuxSession ?? "",
+            ...(launchPrompt ? { firstInputText: launchPrompt.prompt } : {}),
             resumeToken: launchResumeToken,
+            ...(launchResumeToken && input.resumeType ? { resumeType: input.resumeType } : {}),
             ...(input.forkSource && !launchResumeToken ? { forkSource: input.forkSource } : {}),
           });
+          if (launchResult.firstInput) {
+            input.firstInputPassed = deliveryInput.firstInputPassed = true;
+            this.eventBus.emit({ type: "node.startup_first_input_passed", rigId: input.rigId, nodeId: input.nodeId,
+              sessionId: input.sessionId, ...launchResult.firstInput });
+            warnings.push("First startup input passed at launch; submission is not confirmed.");
+          }
           if (launchResult.ok) {
             appliedLaunch = launchResult.appliedLaunch;
             resumedProcess = launchResult.resumedProcess;
@@ -567,10 +607,17 @@ export class StartupOrchestrator {
             }
             const notice = nonInterruptiveNotice(input.adapter.runtime, input.binding);
             if (notice) warnings.push(`${input.sessionName ?? input.nodeId}: ${notice}`);
+            const planNote = planModelAliasNotice(input.adapter.runtime, input.binding, input.sessionName ?? input.nodeId);
+            if (planNote) warnings.push(`${input.sessionName ?? input.nodeId}: ${planNote}`);
+            for (const note of launchResult.warnings ?? []) warnings.push(`${input.sessionName ?? input.nodeId}: ${note}`);
             const normalizedResumeToken = launchResult.resumeToken?.trim();
             if (normalizedResumeToken) {
               try {
-                this.sessionRegistry.updateResumeToken(input.sessionId, launchResult.resumeType ?? "", normalizedResumeToken, "scrape");
+                if (launchResult.resumeProvenance) {
+                  this.sessionRegistry.recordLauncherReportedToken(input.sessionId, launchResult.resumeType ?? "", normalizedResumeToken, launchResult.resumeProvenance);
+                } else {
+                  this.sessionRegistry.updateResumeToken(input.sessionId, launchResult.resumeType ?? "", normalizedResumeToken, "scrape");
+                }
               } catch { /* best-effort */ }
             }
             // OPR.0.7.0.9: the prompt a new conversation starts with; on a resume, a changed prompt is pending.
@@ -591,7 +638,7 @@ export class StartupOrchestrator {
           }
 
           const shouldRetryFresh =
-            !!launchResumeToken
+            !!launchResumeToken && !input.firstInputPassed
             && input.allowFreshFallback !== false
             && launchResult.recovery === "retry_fresh"
             && !attemptedFreshFallback;
@@ -650,6 +697,10 @@ export class StartupOrchestrator {
     // A successful new lean launch replaces the occupant's proof boundary even
     // if readiness later fails. Failed launches and resume/adopt retain history.
     const isFreshLaunch = continuityOutcome === "fresh" && (!input.skipHarnessLaunch || input.continueFreshStartup === true);
+    // Once a startup turn was refused, the result says what's owed, whatever error comes later. Continuing replays the
+    // whole fresh startup, so don't offer it for a restore, a possibly delivered one-shot, or an uncertain staged input.
+    const owed = (also: string[] = [], refused = deliveryInput.refusedTurn) => refused
+      ? this.owedStartup(deliveryInput, refused, continuityOutcome, isFreshLaunch && !input.isRestore && !deliveryInput.oneShotSent && !deliveryInput.refusedWithStagedInput, also) : null;
     const shouldChallenge = isFreshLaunch
       && input.adapter.runtime !== "terminal" && startupProof.mode === "authenticated";
     if (isFreshLaunch && !shouldChallenge) {
@@ -734,23 +785,24 @@ export class StartupOrchestrator {
       this.appliedLaunchStore.recordGeneration(launchGeneration, appliedLaunch);
     }
 
-    // Issue selected proof only once the runtime can receive its prompt.
-    // Persist ground truth BEFORE delivering any proof prompt.
-    const identityAction = this.extractSessionIdentityAction(input.startupActions, context);
-    const challenge = shouldChallenge
+    // Normally issue proof after readiness; an opted-in launcher already received its challenge in the first input.
+    // Ground truth is persisted before either delivery path.
+    const challenge = launchChallenge ?? (shouldChallenge
       ? issueStartupChallenge(this.eventBus, {
           rigId: input.rigId,
           nodeId: input.nodeId,
           contractSource: JSON.stringify(input.resolvedStartupFiles),
         })
-      : null;
+      : null);
 
     // A selected proof still works without a session_identity action: deliver
     // its standalone prompt after the post-launch contract files below.
     const consumedActions = new Set<StartupAction>();
     let challengeOnlyPrompt: string | null = null;
     if (continuityOutcome === "fresh" && identityAction) {
-      const initialPrompt = await this.deliverInitialSessionPrompt(deliveryInput, identityAction, postLaunchFiles, challenge?.promptBlock ?? null, input.includeDurableObligations);
+      const initialPrompt = input.firstInputPassed && launchPrompt
+        ? { ok: true as const, remainingFiles: launchPrompt.remainingFiles }
+        : await this.deliverInitialSessionPrompt(deliveryInput, identityAction, postLaunchFiles, challenge?.promptBlock ?? null, input.includeDurableObligations);
       if (!initialPrompt.ok) {
         errors.push(initialPrompt.error);
         return this.fail(input, "failed", errors, undefined, false, undefined, false, "initial_prompt", true);
@@ -808,11 +860,11 @@ export class StartupOrchestrator {
           for (const f of deliveryResult.failed) {
             errors.push(`Post-launch file delivery failed: ${f.path}: ${f.error}`);
           }
-          return this.fail(deliveryInput, "failed", errors, undefined, false, undefined, false, "post_launch_files", true);
+          return owed(errors) ?? this.fail(deliveryInput, "failed", errors, undefined, false, undefined, false, "post_launch_files", true);
         }
       } catch (err) {
         errors.push(`Post-launch delivery error: ${(err as Error).message}`);
-        return this.fail(deliveryInput, "failed", errors, undefined, false, undefined, false, "post_launch_files", true);
+        return owed(errors) ?? this.fail(deliveryInput, "failed", errors, undefined, false, undefined, false, "post_launch_files", true);
       }
     }
 
@@ -826,15 +878,18 @@ export class StartupOrchestrator {
     // 8. Execute after_files actions
     const afterFilesResult = await this.executeActions(deliveryInput, "after_files");
     if (!afterFilesResult.ok) {
-      return this.fail(deliveryInput, "failed", afterFilesResult.errors, undefined, false, undefined, false, "after_files", true);
+      return owed(afterFilesResult.errors) ?? this.fail(deliveryInput, "failed", afterFilesResult.errors, undefined, false, undefined, false, "after_files", true);
     }
 
     // 9. Execute after_ready actions (skipping any preload actions already
     // delivered ahead of role.md by the restore-order bundling above).
     const afterReadyResult = await this.executeActions(deliveryInput, "after_ready", consumedActions);
     if (!afterReadyResult.ok) {
-      return this.fail(deliveryInput, "failed", afterReadyResult.errors, undefined, false, undefined, false, "after_ready", true);
+      return owed(afterReadyResult.errors) ?? this.fail(deliveryInput, "failed", afterReadyResult.errors, undefined, false, undefined, false, "after_ready", true);
     }
+
+    const held = owed();
+    if (held) return held;
 
     // Delivering the first native prompt can reveal a provider refusal or
     // interactive gate. Bundled identity/preload prompts consume their files,
@@ -843,6 +898,10 @@ export class StartupOrchestrator {
       try {
         const readiness = await input.adapter.checkReady(input.binding);
         if (!readiness.ready && isAttentionRequiredReadinessCode(readiness.code)) {
+          // A fresh Claude start whose last startup turn was refused hasn't read what that turn sent: it's owed too.
+          const refusedLast = input.adapter.runtime === "claude-code" && isFreshLaunch && deliveryInput.sendOrder > 0
+            ? owed([], readiness) : null;
+          if (refusedLast) return refusedLast;
           const hasRemainingIdentityWork = hasClaudeResumeIdentityWork(
             this.sessionRegistry,
             input.sessionId,
@@ -880,6 +939,16 @@ export class StartupOrchestrator {
       ], undefined, false, undefined, false, "identity_verification", false);
     }
 
+    // Keep the running conversation, but don't call an explicitly assisted startup ready.
+    // The paste and Enter were attempted; continuing startup must not paste that context a second time.
+    if ((deliveryInput.sendOrder > 0 || input.firstInputPassed) && startupAssisted) {
+      return this.fail(deliveryInput, "attention_required", [
+        `Startup assisted for community harness "${input.adapter.runtime}" in ${input.binding.tmuxSession}: ${input.firstInputPassed ? "first input was passed at launch" : "text and Enter were sent"}, but submission isn't confirmed. `
+          + `Check the pane and submit any staged startup text; don't resend it. Once the seat has responded, acknowledge it with `
+          + `rig seat clear-attention ${shellQuote(input.binding.tmuxSession!)} --reason ${shellQuote("Startup submission checked; seat responded")}.`,
+      ], undefined, false, undefined, false, "assisted_startup", false);
+    }
+
     // 8. Mark ready
     this.sessionRegistry.updateStartupStatus(input.sessionId, "ready", new Date().toISOString());
     const submission = deliveryInput.submissionWarnings.length
@@ -893,8 +962,9 @@ export class StartupOrchestrator {
     return { ok: true, startupStatus: "ready", continuityOutcome, ...(submission ? { submission } : {}), ...(routerLine ? { routerLine } : {}), ...(resumedProcess ? { resumedProcess } : {}) };
   }
 
-  /** A failed attempt can continue only when it stopped before sending context.
-   * Any newer pending/ready/failure event consumes that permission, including a
+  /** A failed attempt can continue only when it stopped before sending context, or when the runtime positively refused
+   * the turn its context went to (an attention code after it) and no one-shot action was typed: a refused turn wasn't
+   * read. Any newer pending/ready/failure event consumes that permission, including a
    * daemon loss during delivery: uncertain delivery is never blindly replayed.
    */
   canContinueStartup(nodeId: string, sessionId: string): boolean {
@@ -951,6 +1021,10 @@ export class StartupOrchestrator {
     hasPendingWork?: boolean,
     probe?: import("./native-resume-probe-evidence.js").NativeResumeProbeEvidence,
   ): StartupResult {
+    if (input.firstInputPassed) {
+      pendingContext = false;
+      errors.push("First startup input was passed at launch; submission is unconfirmed. Inspect the pane before sending anything again.");
+    }
     if (status === "attention_required" && typeof pendingContext === "object") {
       // The reasons above stay visible; this only says what the status means for the fork.
       errors.push("The fork's startup context is waiting to be sent: this attention status doesn't mean the forked conversation is healthy");
@@ -1002,6 +1076,7 @@ export class StartupOrchestrator {
       if (input.isRestore && !action.idempotent) continue;
 
       // Execute via tmux
+      const heldBefore = input.heldInputs ?? 0;
       try {
         if (!input.binding.tmuxSession) {
           errors.push(`No tmux session for action: ${action.value}`);
@@ -1015,6 +1090,9 @@ export class StartupOrchestrator {
       } catch (err) {
         errors.push(`Action error (${action.type}): ${(err as Error).message}`);
       }
+      // A one-shot that wasn't held may have reached the seat even when its send reported an error (the text typed, the
+      // Enter failed): uncertain delivery is never replayed.
+      if (!action.idempotent && (input.heldInputs ?? 0) === heldBefore) input.oneShotSent = true;
     }
 
     return errors.length > 0 ? { ok: false, errors } : { ok: true };
@@ -1027,18 +1105,14 @@ export class StartupOrchestrator {
     return actions.find((action) => isSessionIdentityAction(action) && action.appliesOn.includes(context)) ?? null;
   }
 
-  private async deliverInitialSessionPrompt(
+  private composeInitialSessionPrompt(
     input: StartupDeliveryInput,
     identityAction: StartupAction,
     postLaunchFiles: ResolvedStartupFile[],
     challengeBlock: string | null,
     includeDurableObligations = false,
-  ): Promise<{ ok: true; remainingFiles: ResolvedStartupFile[] } | { ok: false; error: string }> {
+  ): { prompt: string; remainingFiles: ResolvedStartupFile[] } {
     const { binding } = input;
-    if (!binding.tmuxSession) {
-      return { ok: false, error: "No tmux session for the initial session identity prompt" };
-    }
-
     const firstSendTextIndex = postLaunchFiles.findIndex((file) => file.deliveryHint === "send_text");
     const identityContext = `OpenRig-generated identity context (not a project task):\n${identityAction.value}\nEnd of generated identity context.`;
     let prompt = identityContext;
@@ -1070,6 +1144,22 @@ export class StartupOrchestrator {
       prompt = `${prompt}\n\n${challengeBlock}`;
     }
 
+    return { prompt, remainingFiles };
+  }
+
+  private async deliverInitialSessionPrompt(
+    input: StartupDeliveryInput,
+    identityAction: StartupAction,
+    postLaunchFiles: ResolvedStartupFile[],
+    challengeBlock: string | null,
+    includeDurableObligations = false,
+  ): Promise<{ ok: true; remainingFiles: ResolvedStartupFile[] } | { ok: false; error: string }> {
+    const { binding } = input;
+    if (!binding.tmuxSession) {
+      return { ok: false, error: "No tmux session for the initial session identity prompt" };
+    }
+
+    const { prompt, remainingFiles } = this.composeInitialSessionPrompt(input, identityAction, postLaunchFiles, challengeBlock, includeDurableObligations);
     const sendError = await this.sendInteractiveText(input, prompt, "initial_identity");
     if (sendError) {
       return { ok: false, error: `Initial session identity prompt failed: ${sendError.error}` };
@@ -1146,7 +1236,48 @@ export class StartupOrchestrator {
       : `Startup submission unverified in ${input.binding.tmuxSession}: ${reason}`));
   }
 
+  /** The result of a start whose turn the runtime refused: the seat hasn't read its startup context, which never reads as
+   *  delivered. `continuable` keeps it pending for `rig seat continue` (the whole startup again). Otherwise the seat says
+   *  why not: a new conversation names the fresh launch that delivers it; a resumed or forked one keeps its conversation,
+   *  and is never told to relaunch blank. Later errors (`also`) are listed, never in its place. */
+  private owedStartup(input: StartupDeliveryInput, refused: ReadinessResult, continuity: string, continuable: boolean, also: string[]): StartupResult {
+    const held = input.heldInputs
+      ? `${input.heldInputs} later startup input${input.heldInputs === 1 ? " wasn't" : "s weren't"} sent. ` : "";
+    const why = input.oneShotSent ? "a one-shot startup action already ran and must not run twice"
+      : input.refusedWithStagedInput ? "the next startup input may still be in the input box"
+      : "this start was a restore, and continuing delivers a fresh start's context";
+    return this.fail(input, "attention_required", [
+      refused.reason ?? "The runtime refused a startup turn.",
+      ...also,
+      ...(input.refusedWithStagedInput ? [
+        `OpenRig pasted the next startup input in ${input.binding.tmuxSession} but didn't press Enter, because Claude had refused the turn before it. It may still be in the input box, so don't resend it.${continuity !== "fresh" ? " Check the pane; clear it or send it after signing in." : ""}`,
+      ] : []),
+      continuable
+        ? `${held}The seat hasn't read its startup context. Continuing delivers the whole startup again, the refused turn included.`
+        : continuity !== "fresh"
+          ? `${held}The seat's conversation is kept, but it hasn't read ${input.heldInputs ? (input.heldInputs === 1 ? "that input" : "those inputs") : "all of its startup context"}; continuing isn't offered for a ${continuity} start.`
+          : `${held}The seat hasn't read all of its startup context, and continuing isn't offered: ${why}. To deliver it, launch the seat fresh: rig seat launch ${shellQuote(input.binding.tmuxSession ?? "<seat>")} --fresh --stop --reason "<why>".`,
+    ], undefined, continuable, undefined, false, "post_delivery_readiness", true);
+  }
+
+  /** Whether the runtime refused the last startup turn: an attention readiness code now (Claude's "Login expired ·
+   *  Please run /login" as its latest response reads login_required). An unavailable observation holds nothing back. */
+  private async refusedTurn(input: StartupDeliveryInput): Promise<ReadinessResult | undefined> {
+    try {
+      const readiness = await input.adapter.checkReady(input.binding);
+      return !readiness.ready && isAttentionRequiredReadinessCode(readiness.code) ? readiness : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   private async sendInteractiveText(input: StartupDeliveryInput, text: string, source: StartupSubmissionDiagnostic["source"], actionIndex?: number): Promise<StartupSendFailure | null> {
+    // After a refused turn nothing more is typed into the seat. The held input is counted, and startNode reports it as
+    // owed (ahead of any later error) before it would mark the seat ready, so returning here never reads as delivered.
+    if (input.adapter.runtime === "claude-code" && input.sendOrder > 0 && (input.refusedTurn ??= await this.refusedTurn(input))) {
+      input.heldInputs = (input.heldInputs ?? 0) + 1;
+      return null;
+    }
     const sendOrder = ++input.sendOrder;
     const tmuxSession = input.binding.tmuxSession!;
     input.lastSubmissionConfirmed = false;
@@ -1158,6 +1289,13 @@ export class StartupOrchestrator {
     }
 
     await this.sleep(200);
+    // The previous turn can refuse after the pre-paste check. Leave our new paste alone rather than submitting it
+    // into that refusal. It is already typed, not an unsent input, and must not be replayed by seat continue.
+    if (input.adapter.runtime === "claude-code" && sendOrder > 1 && (input.refusedTurn ??= await this.refusedTurn(input))) {
+      input.refusedWithStagedInput = true;
+      input.lastSubmissionUnconfirmedReason = UNCONFIRMED_STAGED;
+      return null;
+    }
     const submitResult = await this.tmuxAdapter.sendKeys(tmuxSession, ["Enter"]);
     if (!submitResult.ok) {
       return { error: (submitResult as { message?: string }).message ?? "unknown" };
