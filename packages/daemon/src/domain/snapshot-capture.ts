@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import {
+  resolveActiveSnapshotSession,
   deriveActiveOccupantsByNode,
   deriveActiveSessionIdByNode,
   deriveRehydrateOccupantsByNode,
@@ -146,6 +147,34 @@ export class SnapshotCapture {
       nodeStartupContext,
       envReceipt,
     };
+
+    // A periodic tick between separate per-agent launches must not erase the
+    // down agents' selected resume sources. Keep occupancy absent, and copy the
+    // entire source into this snapshot so pruning the predecessor is harmless.
+    if (kind === "auto-periodic" && rig.nodes.some(node => activeOccupantsByNode[node.id]?.kind === "absent")) {
+      let previous: Snapshot | null = null;
+      try { previous = this.snapshotRepo.findLatestRestoreUsable(rigId); }
+      catch (error) {
+        // Capture remains crash insurance even when the optional history lookup
+        // fails, as the scheduler's existing lookup-failure contract requires.
+        console.warn(`Periodic snapshot: resume sources unavailable for ${rigId}: ${String(error)}`);
+      }
+      if (previous) {
+        for (const node of rig.nodes) {
+          if (activeOccupantsByNode[node.id]?.kind !== "absent"
+            || previous.data.nodes.find(prior => prior.id === node.id)?.runtime !== node.runtime) continue;
+          const occupant = resolveActiveSnapshotSession(previous.data, node.id);
+          const source = occupant.kind === "resolved" ? occupant.session
+            : occupant.kind === "none" ? previous.data.periodicResumeSourcesByNode?.[node.id] : undefined;
+          if (!source || source.nodeId !== node.id) continue;
+          const current = sessions.find(row => row.id === source.id && row.nodeId === node.id);
+          (data.periodicResumeSourcesByNode ??= {})[node.id] = structuredClone({
+            ...(current?.resumeToken ? current : source),
+            status: current?.status ?? "exited",
+          });
+        }
+      }
+    }
 
     // 5. Atomic: persist snapshot + event in one transaction
     const txn = this.db.transaction(() => {

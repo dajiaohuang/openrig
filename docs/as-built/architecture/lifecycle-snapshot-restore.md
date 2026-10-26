@@ -73,10 +73,19 @@ All in `packages/daemon/src/domain/types.ts`. The spec/projection types live in
   first three; `not_attempted` is set when pre-restore validation fails
   (`:281`).
 - **SnapshotData** (`types.ts:351`) — the serialized snapshot payload. It has
-  **7** optional fields, kept optional so older snapshots still load
+  **8** optional fields, kept optional so older snapshots still load
   (`sed -n '/^export interface SnapshotData/,/^}/p' packages/daemon/src/domain/types.ts | grep -c '?:'`):
-  `activeSessionIdByNode?`, `activeOccupantsByNode?`, `topologyRoster?`,
-  `pods?`, `continuityStates?`, `nodeStartupContext?`, `envReceipt?`.
+  `activeSessionIdByNode?`, `activeOccupantsByNode?`, `periodicResumeSourcesByNode?`,
+  `topologyRoster?`, `pods?`, `continuityStates?`, `nodeStartupContext?`, `envReceipt?`.
+  Periodic snapshots retain a down agent's whole authoritative resume-source
+  session in `periodicResumeSourcesByNode`, without marking it running. A named
+  single-agent launch using automatic periodic selection can resume that exact
+  carried source; an explicit snapshot or whole-rig restore still asks about an
+  absent agent. The selected source is shared by preflight and post-launch
+  restore; explicit reviewed-history selection keeps its existing checks.
+  Ranking, periodic cadence and `--fresh` are unchanged. Retention is best-effort
+  if the earlier-source lookup fails: capture still records current crash
+  insurance and logs that the resume sources were unavailable.
 - **NodeStartupSnapshot** (`types.ts:344`) — persisted restore replay input:
   classification-free projection entries, resolved startup files, startup
   actions, runtime.
