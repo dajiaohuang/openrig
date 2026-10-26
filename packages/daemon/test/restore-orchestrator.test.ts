@@ -308,9 +308,9 @@ describe("RestoreOrchestrator", () => {
     expect(snapshotRepo.findLatestRestoreUsable(other.id)?.kind).toBe("auto-periodic");
   });
 
-  it.each(["explicit snapshot", "whole rig", "missing token", "foreign source"])("#1822 preserves the decision boundary for %s", async (mode) => {
+  it.each(["explicit snapshot", "whole rig", "foreign source"])("#1822 preserves the decision boundary for %s", async (mode) => {
     const original = seedRigAndSnapshot({ nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }],
-      edges: [], resumeType: "claude_id", resumeToken: mode === "missing token" ? undefined : "saved-conversation" });
+      edges: [], resumeType: "claude_id", resumeToken: "saved-conversation" });
     snapshotCapture.captureSnapshot(original.rigId, "auto-pre-down");
     db.prepare("UPDATE sessions SET status = 'exited'").run();
     const periodic = snapshotCapture.captureSnapshot(original.rigId, "auto-periodic");
@@ -329,6 +329,31 @@ describe("RestoreOrchestrator", () => {
       expect(result.launched?.[0]?.status).toBe("awaiting-decision");
     }
     expect(tmux.createSession).not.toHaveBeenCalled();
+    expect(claude.resume).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["automatic", "claude-code"], ["explicit", "claude-code"], ["whole rig", "claude-code"],
+    ["explicit", "terminal"], ["whole rig", "terminal"],
+  ])("#1822 missing token keeps the existing fresh path for %s (%s)", async (mode, runtime) => {
+    const original = seedRigAndSnapshot({ nodes: [{ logicalId: "worker", role: "worker", runtime }],
+      edges: [], resumeType: "claude_id" });
+    snapshotCapture.captureSnapshot(original.rigId, "auto-pre-down");
+    db.prepare("UPDATE sessions SET status = 'exited'").run();
+    const periodic = snapshotCapture.captureSnapshot(original.rigId, "auto-periodic");
+    expect(periodic.data.periodicResumeSourcesByNode).toBeUndefined();
+    const tmux = mockTmux();
+    const claude = mockClaudeResume();
+    const orch = createOrchestrator({ tmux, claude });
+    if (mode === "whole rig") {
+      const result = await orch.restore(periodic.id);
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.result.nodes[0]?.status).toBe("fresh-primed");
+    } else {
+      const result = await orch.launchSingleNode(original.rigId, "worker", mode === "explicit" ? { snapshotId: periodic.id } : undefined);
+      expect(result.launched?.[0]?.status).toBe("fresh-primed");
+    }
+    expect(tmux.createSession).toHaveBeenCalled();
     expect(claude.resume).not.toHaveBeenCalled();
   });
 

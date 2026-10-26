@@ -85,6 +85,42 @@ describe("SnapshotCapture", () => {
     expect(capture.captureSnapshot(rig.id, "manual").data.periodicResumeSourcesByNode).toBeUndefined();
   });
 
+  it.each(["no token", "relaunch_fresh", "checkpoint_only", "no resume type"])("#1822 does not carry non-resumable history: %s", (mode) => {
+    const { rig, n2 } = seedRig();
+    const row = sessionRegistry.registerSession(n2.id, "r01-worker");
+    sessionRegistry.updateStatus(row.id, "running");
+    sessionRegistry.updateResumeToken(row.id, mode === "no resume type" ? "none" : "codex_id", "old-token");
+    if (mode === "no token") db.prepare("UPDATE sessions SET resume_token = NULL WHERE id = ?").run(row.id);
+    if (mode === "relaunch_fresh" || mode === "checkpoint_only") db.prepare("UPDATE sessions SET restore_policy = ? WHERE id = ?").run(mode, row.id);
+    capture.captureSnapshot(rig.id, "auto-pre-down");
+    sessionRegistry.updateStatus(row.id, "exited");
+    expect(capture.captureSnapshot(rig.id, "auto-periodic").data.periodicResumeSourcesByNode).toBeUndefined();
+  });
+
+  it.each(["newer session", "fresh successor", "dangling fresh effect"])("#1822 does not carry a retired predecessor: %s", (mode) => {
+    const { rig, n2 } = seedRig();
+    const old = sessionRegistry.registerSession(n2.id, "r01-old");
+    sessionRegistry.updateStatus(old.id, "running");
+    sessionRegistry.updateResumeToken(old.id, "codex_id", "retired-token");
+    capture.captureSnapshot(rig.id, "auto-pre-down");
+    sessionRegistry.updateStatus(old.id, "exited");
+    let successorId = "missing-session";
+    if (mode !== "dangling fresh effect") {
+      const successor = sessionRegistry.registerSession(n2.id, "r01-new", mode === "fresh successor" ? "fresh" : undefined);
+      successorId = successor.id;
+      sessionRegistry.updateStatus(successor.id, "running");
+      sessionRegistry.updateResumeToken(successor.id, "codex_id", "new-conversation");
+      sessionRegistry.updateStatus(successor.id, "exited");
+    }
+    if (mode !== "newer session") {
+      db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, 'seat.fresh_launched', ?)").run(rig.id, n2.id,
+        JSON.stringify({ nodeId: n2.id, sessionId: successorId, newGeneration: sessionRegistry.currentOccupantTenure(n2.id)!.generationUuid }));
+    }
+    const periodic = capture.captureSnapshot(rig.id, "auto-periodic");
+    expect(periodic.data.periodicResumeSourcesByNode).toBeUndefined();
+    expect(periodic.data.activeOccupantsByNode?.[n2.id]).toEqual({ kind: "absent" });
+  });
+
   it("#1822 does not select arbitrary history for an ambiguous predecessor or a changed runtime", () => {
     const { rig, n2 } = seedRig();
     const first = sessionRegistry.registerSession(n2.id, "r01-first");

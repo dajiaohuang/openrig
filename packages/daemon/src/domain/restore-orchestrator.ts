@@ -708,13 +708,19 @@ export class RestoreOrchestrator {
         // Keep the pane/history and the existing per-target failure contract.
         // Choosing a fresh versus resumed conversation belongs to the person. Stopping closes the pane, so
         // stop-then-launch is offered as a resume only when this snapshot can resume the seat; otherwise the
-        // message says what that launch would do instead. The command pins the snapshot that was checked.
+        // message says what that launch would do instead. Only resolved occupants
+        // can pin this snapshot; an automatic carry must be selected automatically again.
         const liveNode = allNodes.find(current => current.logicalId === node.logicalId);
         const outcome = snapshotLaunchOutcome(snapshot.data, node.id, liveNode ? liveNode.runtime : node.runtime, node.runtime,
           resumePeriodicCarry && liveNode?.id === node.id);
-        const launchCommand = `rig launch ${rigId} ${node.logicalId} --snapshot-id ${snapshot.id}`;
+        const automaticCarry = resumePeriodicCarry
+          && resolveActiveSnapshotSession(snapshot.data, node.id).kind === "none"
+          && !!snapshot.data.periodicResumeSourcesByNode?.[node.id];
+        const launchCommand = `rig launch ${rigId} ${node.logicalId}${automaticCarry ? "" : ` --snapshot-id ${snapshot.id}`}`;
         const relaunch = outcome.kind === "resume"
-          ? `To resume its conversation: rig seat stop ${idleSession} --reason "<why>", then ${launchCommand} (this closes the pane, and launch resumes from that snapshot's resume token). `
+          ? automaticCarry
+            ? `To retry automatic resume: rig seat stop ${idleSession} --reason "<why>", then ${launchCommand} (this closes the pane; launch reselects the latest usable snapshot rather than pinning this one, so the result depends on that new selection). `
+            : `To resume its conversation: rig seat stop ${idleSession} --reason "<why>", then ${launchCommand} (this closes the pane, and launch resumes from that snapshot's resume token). `
           : `Stopping it and launching from snapshot ${snapshot.id} won't resume this conversation: that snapshot ${outcome.why}, so launch would `
             + `${outcome.kind === "fresh" ? "start a fresh conversation" : outcome.kind === "decision" ? "start nothing and ask for a decision" : "fail"}. `;
         launched.push({

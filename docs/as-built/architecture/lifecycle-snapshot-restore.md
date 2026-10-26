@@ -81,7 +81,11 @@ All in `packages/daemon/src/domain/types.ts`. The spec/projection types live in
   session in `periodicResumeSourcesByNode`, without marking it running. A named
   single-agent launch using automatic periodic selection can resume that exact
   carried source; an explicit snapshot or whole-rig restore still asks about an
-  absent agent. The selected source is shared by preflight and post-launch
+  absent agent with resumable history. Tokenless and non-resume-policy agents
+  keep their existing fresh path. Only the node's newest session with a token
+  and `resume_if_possible` policy is carried; a current fresh-successor relation
+  must agree. Idle-shell carry advice uses automatic selection again, not an
+  explicit snapshot that disables carry. The selected source is shared by preflight and post-launch
   restore; explicit reviewed-history selection keeps its existing checks.
   Ranking, periodic cadence and `--fresh` are unchanged. Retention is best-effort
   if the earlier-source lookup fails: capture still records current crash

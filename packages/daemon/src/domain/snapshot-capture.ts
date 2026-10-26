@@ -160,6 +160,7 @@ export class SnapshotCapture {
         console.warn(`Periodic snapshot: resume sources unavailable for ${rigId}: ${String(error)}`);
       }
       if (previous) {
+        const fresh = readFreshOccupantRelations(this.db, rigId);
         for (const node of rig.nodes) {
           if (activeOccupantsByNode[node.id]?.kind !== "absent"
             || previous.data.nodes.find(prior => prior.id === node.id)?.runtime !== node.runtime) continue;
@@ -167,10 +168,17 @@ export class SnapshotCapture {
           const source = occupant.kind === "resolved" ? occupant.session
             : occupant.kind === "none" ? previous.data.periodicResumeSourcesByNode?.[node.id] : undefined;
           if (!source || source.nodeId !== node.id) continue;
-          const current = sessions.find(row => row.id === source.id && row.nodeId === node.id);
+          // The prior occupant is a candidate, not permission to revive a
+          // retired conversation after a newer (including deliberate fresh) launch.
+          const newest = sessions.filter(row => row.nodeId === node.id)
+            .reduce<typeof source | null>((latest, row) => !latest || row.id > latest.id ? row : latest, null);
+          if (!newest || newest.id !== source.id
+            || (Object.hasOwn(fresh, node.id) && fresh[node.id] !== source.id)) continue;
+          const retained = newest.resumeToken ? newest : source;
+          if (newest.restorePolicy !== "resume_if_possible" || retained.restorePolicy !== "resume_if_possible"
+            || !retained.resumeToken?.trim() || !retained.resumeType || retained.resumeType === "none") continue;
           (data.periodicResumeSourcesByNode ??= {})[node.id] = structuredClone({
-            ...(current?.resumeToken ? current : source),
-            status: current?.status ?? "exited",
+            ...retained, status: newest.status,
           });
         }
       }
