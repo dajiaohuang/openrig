@@ -58,6 +58,7 @@ export class SnapshotCapture {
     this.checkpointStore = deps.checkpointStore;
   }
 
+  /** Capture truthful occupancy and, on periodic ticks, eligible whole-session resume sources. */
   captureSnapshot(rigId: string, kind: string, opts?: { intendedNodeIds?: string[]; /** Slice 16: notify after the caller's own
     transaction commits, not from inside it. */ deferNotify?: (event: PersistedEvent) => void }): Snapshot {
     // 1. Get rig with nodes, edges, bindings

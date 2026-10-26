@@ -68,11 +68,15 @@ describe("SnapshotCapture", () => {
     sessionRegistry.updateStatus(worker.id, "running");
     sessionRegistry.updateResumeToken(worker.id, "community:demo", "worker-conversation", "hook");
     sessionRegistry.recordCommunityHarnessSelection(worker.id, "demo");
+    db.prepare("UPDATE sessions SET last_seen_at = ? WHERE id = ?").run("2026-10-26 00:00:00", worker.id);
     const before = capture.captureSnapshot(rig.id, "auto-pre-down");
     sessionRegistry.updateStatus(worker.id, "exited");
+    // Force a second boundary without sleeping; compare the full current row.
+    db.prepare("UPDATE sessions SET last_seen_at = ? WHERE id = ?").run("2026-10-26 00:00:01", worker.id);
     const periodic = capture.captureSnapshot(rig.id, "auto-periodic");
     const carried = periodic.data.periodicResumeSourcesByNode?.[n2.id];
-    expect(carried).toEqual({ ...before.data.sessions.find(row => row.id === worker.id), status: "exited" });
+    expect(carried).toEqual(sessionRegistry.getSessionsForRig(rig.id).find(row => row.id === worker.id));
+    expect(carried?.status).toBe("exited");
     expect(carried?.communityHarness).toBe("demo");
     expect(periodic.data.activeOccupantsByNode?.[n2.id]).toEqual({ kind: "absent" });
     expect(periodic.data.periodicResumeSourcesByNode?.[n1.id]).toBeUndefined();

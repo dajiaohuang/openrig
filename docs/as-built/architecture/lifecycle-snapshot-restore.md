@@ -84,7 +84,10 @@ All in `packages/daemon/src/domain/types.ts`. The spec/projection types live in
   absent agent with resumable history. Tokenless and non-resume-policy agents
   keep their existing fresh path. Only the node's newest session with a token
   and `resume_if_possible` policy is carried; a current fresh-successor relation
-  must agree. Idle-shell carry advice uses automatic selection again, not an
+  must agree. Named launch rechecks the live newest session, resume policy and
+  fresh-successor relation under its lifecycle lease, before changing any seat
+  state; a source retired after capture stops and asks without launching.
+  Idle-shell carry advice uses automatic selection again, not an
   explicit snapshot that disables carry. The selected source is shared by preflight and post-launch
   restore; explicit reviewed-history selection keeps its existing checks.
   Ranking, periodic cadence and `--fresh` are unchanged. Retention is best-effort

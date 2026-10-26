@@ -264,6 +264,44 @@ describe("RestoreOrchestrator", () => {
     expect((await orch.launchSingleNode(original.rigId, "worker")).launched?.[0]?.status).toBe("resumed");
   });
 
+  it.each(["newer session", "fresh successor", "changed policy", "dangling fresh effect", "missing source", "changed native token", "changed runtime"])(
+    "#1822 rejects stale carried history changed after capture: %s", async (mode) => {
+      const original = seedRigAndSnapshot({ nodes: [{ logicalId: "worker", role: "worker", runtime: "claude-code" }],
+        edges: [], resumeType: "claude_id", resumeToken: "retired-after-tick" });
+      snapshotCapture.captureSnapshot(original.rigId, "auto-pre-down");
+      db.prepare("UPDATE sessions SET status = 'exited'").run();
+      const periodic = snapshotCapture.captureSnapshot(original.rigId, "auto-periodic");
+      const node = original.data.nodes[0]!;
+      const source = periodic.data.periodicResumeSourcesByNode![node.id]!;
+      expect(source.resumeToken).toBe("retired-after-tick");
+      let successorId = "missing-session";
+      if (mode === "newer session" || mode === "fresh successor") {
+        const next = sessionRegistry.registerSession(node.id, "r99-successor", mode === "fresh successor" ? "fresh" : undefined);
+        successorId = next.id;
+        sessionRegistry.updateResumeToken(next.id, "claude_id", "new-conversation");
+        sessionRegistry.updateStatus(next.id, "exited");
+      }
+      if (mode === "changed policy") db.prepare("UPDATE sessions SET restore_policy = 'relaunch_fresh' WHERE id = ?").run(source.id);
+      if (mode === "changed native token") sessionRegistry.updateResumeToken(source.id, "claude_id", "new-conversation");
+      if (mode === "changed runtime") db.prepare("UPDATE nodes SET runtime = 'codex' WHERE id = ?").run(node.id);
+      if (mode === "missing source") db.prepare("DELETE FROM sessions WHERE id = ?").run(source.id);
+      if (mode === "fresh successor" || mode === "dangling fresh effect") {
+        db.prepare("INSERT INTO events (rig_id, node_id, type, payload) VALUES (?, ?, 'seat.fresh_launched', ?)").run(original.rigId, node.id,
+          JSON.stringify({ nodeId: node.id, sessionId: successorId, newGeneration: sessionRegistry.currentOccupantTenure(node.id)!.generationUuid }));
+      }
+      // No new tick: the selected snapshot still offers the now-retired source.
+      expect(snapshotRepo.findLatestRestoreUsable(original.rigId)?.id).toBe(periodic.id);
+      const before = db.prepare("SELECT * FROM sessions ORDER BY id").all();
+      const tmux = mockTmux();
+      const claude = mockClaudeResume();
+      const result = await createOrchestrator({ tmux, claude, listProcesses: nativeLineage("claude-code", "retired-after-tick") })
+        .launchSingleNode(original.rigId, "worker");
+      expect(result.launched?.[0]?.status).toBe("awaiting-decision");
+      expect(tmux.createSession).not.toHaveBeenCalled();
+      expect(claude.resume).not.toHaveBeenCalled();
+      expect(db.prepare("SELECT * FROM sessions ORDER BY id").all()).toEqual(before);
+    });
+
   it("#1822 passes the carried source to a pod-aware runtime adapter", async () => {
     const { StubRuntimeAdapter } = await import("../src/adapters/stub-runtime-adapter.js");
     const rig = rigRepo.createRig("carried-pod");

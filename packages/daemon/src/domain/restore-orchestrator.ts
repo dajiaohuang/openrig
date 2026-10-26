@@ -23,6 +23,7 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { ClaudeResumeAdapter } from "../adapters/claude-resume.js";
 import type { CodexResumeAdapter } from "../adapters/codex-resume.js";
 import { seatRuntimeHome } from "./seat-runtime-home.js";
+import { readFreshOccupantRelations } from "./fresh-occupant-relation.js";
 import type { PiResumeAdapter } from "../adapters/pi-resume.js";
 import type { OmpResumeAdapter } from "../adapters/omp-resume.js";
 import type { TranscriptStore } from "./transcript-store.js";
@@ -1089,6 +1090,22 @@ export class RestoreOrchestrator {
     if (carried && carried.nodeId !== nodeId) {
       return { nodeId, logicalId: node.logicalId, status: "awaiting-decision", error: "The periodic resume source belongs to another agent. No session was started." };
     }
+    if (carried) {
+      // The launch lifecycle lease is held here, before any stale-state cleanup
+      // or destination registration. Capture-time eligibility can have expired
+      // without another tick; never resume a conversation a fresh launch retired.
+      const newest = this.sessionRegistry.getSessionsForRig(rigId).filter(row => row.nodeId === nodeId)
+        .reduce<Session | null>((latest, row) => !latest || row.id > latest.id ? row : latest, null);
+      const fresh = readFreshOccupantRelations(this.db, rigId);
+      if (!absentSeatResumeHistory([carried], nodeId) || !newest || newest.id !== carried.id
+        || newest.restorePolicy !== "resume_if_possible" || newest.status === "superseded"
+        || liveNode?.runtime !== node.runtime
+        || (!!newest.resumeToken?.trim() && (newest.resumeToken !== carried.resumeToken || newest.resumeType !== carried.resumeType))
+        || (Object.hasOwn(fresh, nodeId) && fresh[nodeId] !== carried.id)) {
+        return { nodeId, logicalId: node.logicalId, status: "awaiting-decision",
+          error: "The periodic resume source is no longer this seat's current resumable session. No session was started. Review its history or deliberately start this seat fresh." };
+      }
+    }
     const resumeSession = occupantResolution.kind === "resolved" ? occupantResolution.session : carried ?? null;
     if (occupantResolution.kind === "none" && preserveStoppedCurrent && !freshRequested && !carried) {
       return { nodeId, logicalId: node.logicalId, status: "awaiting-decision", error: stoppedSnapshotReason(node.logicalId, data.rig.name) };
@@ -1423,6 +1440,7 @@ export class RestoreOrchestrator {
     return freshSeatLaunchCommand(logicalId, this.rigRepo.getRig(rigId)?.rig.name ?? data.rig.name);
   }
 
+  /** Replay the preflight-selected source after launch, keeping native identity and startup checks. */
   private async postLaunchRestore(
     entry: PlanEntry,
     rigId: string,
