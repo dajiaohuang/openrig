@@ -59,6 +59,21 @@ describe("Rigspec export routes", () => {
     db.close();
   });
 
+  it("#1631 names unknown member startup on YAML and JSON export without inventing a declaration", async () => {
+    const rig = rigRepo.createRig("old-pod");
+    const pod = new PodRepository(db).createPod(rig.id, "dev", "Dev");
+    rigRepo.addNode(rig.id, "dev.old", { runtime: "codex", podId: pod.id, agentRef: "local:agents/old", profile: "default", cwd: "." });
+    const yamlResponse = await app.request(`/api/rigs/${rig.id}/spec`);
+    expect(yamlResponse.status).toBe(200);
+    const yaml = await yamlResponse.text();
+    expect(yaml).toContain('# Member startup not carried for "dev.old" (source unavailable)');
+    const spec = PodRigSpecSchema.normalize(PodRigSpecCodec.parse(yaml) as Record<string, unknown>);
+    expect(spec.pods[0]!.members[0]!.startup).toBeUndefined();
+    const jsonResponse = await app.request(`/api/rigs/${rig.id}/spec.json`);
+    expect(JSON.parse(decodeURIComponent(jsonResponse.headers.get("X-OpenRig-Export-Warnings")!)))
+      .toEqual([{ logicalId: "dev.old", reason: "source unavailable" }]);
+  });
+
   it("GET /api/rigs/:rigId/spec -> 200 + YAML content-type", async () => {
     const rig = rigRepo.createRig("r99");
     rigRepo.addNode(rig.id, "worker", { runtime: "claude-code" });
@@ -708,6 +723,46 @@ describe("Rigspec import routes (pod-aware dual-stack)", () => {
 
     expect(db.prepare("SELECT workspace_json, updated_at FROM rigs WHERE id = ?").get(rig.id)).toEqual(preimage);
     expect(rigRepo.listRigs()).toHaveLength(1);
+  });
+
+  it("#1631 materialize and re-import preserve a member-only startup root and declaration", async () => {
+    const originalRoot = nodePath.resolve(os.tmpdir(), "original-member-root");
+    const yaml = POD_AWARE_YAML.replace('agent_ref: "local:agents/impl"', 'agent_ref: "builtin:terminal"').replace("runtime: claude-code", "runtime: terminal").replace("profile: default", "profile: none").replace("        cwd: /tmp", `        cwd: /tmp
+        startup:
+          files:
+            - path: notes/member.md
+              delivery_hint: send_text
+          actions:
+            - type: send_text
+              value: orient
+              phase: after_ready
+              idempotent: true`);
+    const created = await app.request("/api/rigs/import/materialize", {
+      method: "POST", headers: { "Content-Type": "text/yaml", "X-Rig-Root": originalRoot }, body: yaml,
+    });
+    const first = await created.json();
+    expect(created.status, JSON.stringify(first)).toBe(201);
+    const rigId = first.rigId as string;
+    expect(rigRepo.getRigStartupLayers(rigId)?.root).toBe(originalRoot);
+    const exportedResponse = await app.request(`/api/rigs/${rigId}/spec`);
+    expect(decodeURIComponent(exportedResponse.headers.get("X-Rig-Root")!)).toBe(originalRoot);
+    const exported = await exportedResponse.text();
+    const normalized = PodRigSpecSchema.normalize(PodRigSpecCodec.parse(exported) as Record<string, unknown>);
+    const startup = normalized.pods[0]!.members[0]!.startup!;
+    expect(startup.files[0]!.path).toBe("notes/member.md");
+    expect(startup.actions[0]!.value).toBe("orient");
+    expect(nodePath.resolve(originalRoot, startup.files[0]!.path)).toBe(nodePath.join(originalRoot, "notes", "member.md"));
+    const restored = await app.request("/api/rigs/import/materialize", {
+      method: "POST", headers: { "Content-Type": "text/yaml", "X-Rig-Root": originalRoot },
+      body: exported.replace("name: pod-rig", "name: restored-rig"),
+    });
+    expect(restored.status).toBe(201);
+    const second = await restored.json();
+    const reexport = await (await app.request(`/api/rigs/${second.rigId}/spec`)).text();
+    const roundTrip = PodRigSpecSchema.normalize(PodRigSpecCodec.parse(reexport) as Record<string, unknown>);
+    expect(roundTrip.pods[0]!.members[0]!.startup).toEqual(startup);
+    expect(sessionRegistry.getSessionsForRig(rigId)).toEqual([]);
+    expect(sessionRegistry.getSessionsForRig(second.rigId)).toEqual([]);
   });
 
   it("POST /api/rigs/import/materialize creates rig structure without launching", async () => {

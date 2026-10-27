@@ -2235,7 +2235,8 @@ export class PodRigInstantiator {
       if (pod.startup?.files.length) podStartupFiles[pod.id] = pod.startup.files;
     }
     const hasPodFiles = Object.keys(podStartupFiles).length > 0;
-    if (!rigSpec.cultureFile && !rigSpec.startup && !hasPodFiles) return;
+    const hasMemberStartupFiles = rigSpec.pods.some(pod => pod.members.some(member => (member.startup?.files.length ?? 0) > 0));
+    if (!rigSpec.cultureFile && !rigSpec.startup && !hasPodFiles && !hasMemberStartupFiles) return;
     this.deps.rigRepo.setRigStartupLayers(rigId, {
       root: nodePath.resolve(rigRoot),
       cultureFile: rigSpec.cultureFile,
