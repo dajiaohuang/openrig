@@ -73,6 +73,21 @@ describe("#142 transport refuses to type into a bare shell where an agent runtim
     expect(sendKeys).not.toHaveBeenCalled();
   });
 
+  it.each(["registered Pi runner behind a shell", "foreign shell without a runner"])("Pi shell refusal exposes the delivery dependency: %s", async (kind) => {
+    const { node } = seat("pi", "dev-impl@my-rig");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: "dev-impl@my-rig", tmuxPane: "%1" });
+    const { tmux, sendText, sendKeys } = tmuxWithPane(async () => "bash");
+    tmux.getPanePid = async () => 1135;
+    const rows: NativeProcessRow[] = [{ pid: 1135, ppid: 1, command: "bash", startedAt: "start" }];
+    if (kind.startsWith("registered")) rows.push({ pid: 1136, ppid: 1135, command: "node pi-runner.js --session-name dev-impl@my-rig", startedAt: "start" });
+    const transport = new SessionTransport({ db, rigRepo, sessionRegistry, tmuxAdapter: tmux, listProcesses: async () => rows });
+    const result = await watchdogSend(transport, "dev-impl@my-rig");
+    expect(result).toMatchObject({ ok: false, sent: false, reason: "target_runtime_unverified" });
+    expect(result.error).toContain("Delivery depends on verifying the bound pane and its input-owning agent");
+    expect(sendText).not.toHaveBeenCalled();
+    expect(sendKeys).not.toHaveBeenCalled();
+  });
+
   it("sibling: a running agent runtime still receives the wake", async () => {
     seat("claude-code", "dev-impl@my-rig");
     const { tmux, sendText } = tmuxWithPane(async () => "claude");
