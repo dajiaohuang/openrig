@@ -1,4 +1,5 @@
 import { seatAccountHome, effectiveRuntimeHome, type HomeRuntime } from "./domain/seat-runtime-home.js";
+import { readPlatformEnv } from "./domain/platform-env.js";
 import { reportRestoreDeliveryFailure } from "./domain/compaction-restore-notice.js";
 import { ClaudeTokenUsage, claudeTokenUsageReader } from "./domain/provider/claude-token-usage.js";
 import type { ClaudeTokenIdentity } from "./domain/provider/provider-types.js";
@@ -302,6 +303,7 @@ export function collectAllowlistedProviderAuthEnv(
   raw: string | null | undefined,
   env: Record<string, string | undefined>,
   runtime?: "omp",
+  platform: NodeJS.Platform = process.platform,
 ): Record<string, string> {
   const admitOmp = runtime === "omp";
   const out: Record<string, string> = {};
@@ -310,7 +312,7 @@ export function collectAllowlistedProviderAuthEnv(
     if (!name) continue;
     if (!/^[A-Z_][A-Z0-9_]*$/.test(name)) continue;
     if (!KNOWN_PROVIDER_AUTH_ENV.has(name) && !(admitOmp && Object.hasOwn(OMP_PROVIDER_AUTH_ENV, name))) continue;
-    const value = env[name];
+    const value = readPlatformEnv(env, name, platform);
     if (typeof value === "string" && value.length > 0) {
       out[name] = value;
     }
