@@ -1,6 +1,5 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-import path from "node:path";
+import { parseWindowsProcesses, readWindowsProcessesStrict } from "./windows-process-table.js";
+export { parseWindowsProcesses, readWindowsProcessesStrict } from "./windows-process-table.js";
 import { isShellForeground } from "./shell-classifier.js";
 import { EMPTY_CLAUDE_MCP_CONFIG } from "./claude-mcp.js";
 import { runAsyncSite } from "./sync-site-wrap.js";
@@ -9,7 +8,6 @@ import { readNativeProcessArguments } from "./native-process-arguments.js";
 import { readProcessTable } from "./process-table.js";
 import { parseWindowsCommandLine } from "../adapters/windows-argv.js";
 
-const execFileAsync = promisify(execFile);
 
 export interface NativeProcessRow {
   platform?: "win32";
@@ -537,14 +535,6 @@ function mayBeClaudeRuntime(row: NativeProcessRow): boolean {
     && args.some(arg => claudeExecutable(arg) || /\/@anthropic-ai\/claude-code\/cli\.m?js$/.test(arg));
 }
 
-/** Strict Windows enumeration: failed CIM reads must not become successful empty censuses. */
-export async function readWindowsProcessesStrict(): Promise<NativeProcessRow[]> {
-  const { stdout } = await execFileAsync(path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
-    ["-NoProfile", "-NonInteractive", "-Command", "[Console]::OutputEncoding=[Text.UTF8Encoding]::new(); @(Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine,@{n='StartedAt';e={$_.CreationDate.ToUniversalTime().ToString('o')}}) | ConvertTo-Json -Compress"],
-    { encoding: "utf8", windowsHide: true, timeout: 5000, maxBuffer: 8 * 1024 * 1024 });
-  return parseWindowsProcesses(stdout);
-}
-
 /** The same OS observation serves menu input, restore proof and periodic identity.
  * Older callers may carry only pid/ppid/command; that is insufficient positive Codex proof. */
 export async function listNativeProcesses(options: { claudeLaunchPaths?: boolean } = {}): Promise<NativeProcessRow[]> {
@@ -595,22 +585,6 @@ function rotationProcess(row: NativeProcessRow, rotation: ClaudeResumeRotation |
 /** `afterScript`: found by the script-launch rule, not the exact-path match; its first proof must be pinned. */
 export type NativeProcessObservation = { panePid: number; process: NativeProcessRow; fingerprint: string; afterScript?: true };
 export type CodexProcessObservation = NativeProcessObservation;
-
-/** CIM supplies executable identity and process birth times, never synthetic POSIX groups. */
-export function parseWindowsProcesses(output: string): NativeProcessRow[] {
-  const values: unknown = JSON.parse(output.replace(/^\uFEFF/, ""));
-  if (!Array.isArray(values)) return [];
-  return values.flatMap((value): NativeProcessRow[] => {
-    const row = value as Record<string, unknown>;
-    if (!row || !Number.isSafeInteger(row.ProcessId) || Number(row.ProcessId) <= 0
-      || !Number.isSafeInteger(row.ParentProcessId) || Number(row.ParentProcessId) < 0
-      || typeof row.Name !== "string" || typeof row.ExecutablePath !== "string"
-      || typeof row.CommandLine !== "string" || typeof row.StartedAt !== "string"
-      || !Number.isFinite(Date.parse(row.StartedAt))) return [];
-    return [{ platform: "win32", pid: Number(row.ProcessId), ppid: Number(row.ParentProcessId),
-      executableName: row.Name, executablePath: row.ExecutablePath, command: row.CommandLine, startedAt: row.StartedAt }];
-  });
-}
 
 function nativeProcessCandidates(rows: NativeProcessRow[], panePid: number, runtime: NativeRuntime, selectedExecutable?: string, scriptLaunch?: boolean): NativeProcessObservation[] {
   const exact = candidatesMatching(rows, panePid, runtime, row => claudeProcess(row, selectedExecutable), selectedExecutable);
