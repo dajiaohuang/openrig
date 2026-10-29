@@ -4073,7 +4073,7 @@ export class QueueRepository {
       )
       .all(...params) as QueueItemRow[];
     const owners = this.transitionLog.ownerNotificationsForQitems(rows.map((row) => row.qitem_id));
-    const ledgers = this.deliveryOutcomesFor(rows, owners);
+    const ledgers = this.deliveryOutcomesFor(rows, owners, true);
     const items = rows.map((r) => {
       const ledger = ledgers.get(r.qitem_id);
       const item = this.rowToItem(r, !opts?.compact, { owners: owners.get(r.qitem_id) ?? [], ledger: ledger ?? null });
@@ -4587,7 +4587,7 @@ export class QueueRepository {
   /** The delivery ledger of each row, its reads batched: one read of the rows' owner notifications (unless the caller
    *  read them already), one of their receipts, the human registry loaded once at most. A single row's
    *  (deliveryOutcomeFor, show, the sweeps) is a batch of one. receiptsAfterEpisodes: read the receipts once the
-   *  episodes (and so the registry) are worked out, as a single row's ledger does; a listing reads them before. */
+   *  episodes (and so the registry) are worked out; listings and single-row projections use that ordering. */
   private deliveryOutcomesFor(rows: LedgerRow[], knownOwners?: Map<string, QueueTransition[]>, receiptsAfterEpisodes = false): Map<string, DeliveryLedger> {
     const ledgers = new Map<string, DeliveryLedger>();
     if (!this.hasQueueTransitionsTable || rows.length === 0) return ledgers;
@@ -4913,7 +4913,7 @@ export class QueueRepository {
       const posted = view.state === "pending" && this.humanNotificationPostedThisEpisode(qitemId, listed);
       const onSteering = !posted && view.state === "pending" && this.humanAskWithoutAlert(qitemId, listed);
       const row = !posted && !onSteering ? this.db.prepare(`SELECT state, ${this.hasHumanIntentColumn ? "human_intent" : "NULL AS human_intent"}, destination_session, last_nudge_result FROM queue_items WHERE qitem_id = ?`).get(qitemId) as { state: QueueItem["state"]; human_intent: QueueItem["humanIntent"]; destination_session: string; last_nudge_result: string | null } | undefined : undefined;
-      const noticeOutcome = this.deliveryOutcomeFor(qitemId)?.outcome;
+      const noticeOutcome = listed ? listed.ledger?.outcome : this.deliveryOutcomeFor(qitemId)?.outcome;
       const localOnly = !!row && noticeOutcome !== "never-posted" && noticeOutcome !== "transport-failed"
         && this.isLocalHumanDecisionWithoutGateway({ state: row.state, humanIntent: row.human_intent, destinationSession: row.destination_session, lastNudgeResult: row.last_nudge_result });
       const awaitingHuman = posted || onSteering || localOnly;
