@@ -23,6 +23,7 @@ import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { QueueRepository, deriveCrossHostSuccessorId, type QueueItem } from "../src/domain/queue-repository.js";
 import { EventBus } from "../src/domain/event-bus.js";
+import { RigRepository } from "../src/domain/rig-repository.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { SettingsStore } from "../src/domain/user-settings/settings-store.js";
 import { archiveAgedTerminalTransitions } from "../src/domain/queue-retention.js";
@@ -110,6 +111,37 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
         (i.tags ?? []).some((t) => t.endsWith(`:${qitemId}`)),
     );
   }
+
+  it("#2278 keeps a local human decision on the attention surface without a false failed-wake finding", async () => {
+    const rigs = new RigRepository(db);
+    const rig = rigs.createRig("kernel");
+    rigs.addNode(rig.id, "operator.agent", { runtime: "terminal" });
+    const row = await repo.create({ sourceSession: "sender@r", destinationSession: "human@kernel", body: "Decide", summary: "Decision", evidenceRef: "decision.md", humanIntent: "decision" });
+    setNudgeResult(row.qitemId, "unroutable: 'human@kernel' has no terminal transport on this daemon and names no registered human", new Date(Date.now() - 10 * 60_000));
+    expect(repo.classifyDestinationOf("human@kernel").class).toBe("unroutable");
+    ageCreated(row.qitemId, 90);
+    expect(repo.listAttention().some(item => item.qitemId === row.qitemId)).toBe(true);
+    await runSweep();
+    expect(await findingsFor(row.qitemId)).toEqual([]);
+    expect(repo.waitingView(row.qitemId)?.nextBackstop.mechanism).toContain("local attention feed");
+  });
+
+  it("#2278 does not suppress ordinary failures, external addresses, or an unreadable registry", async () => {
+    const row = await repo.create({ sourceSession: "sender@r", destinationSession: "human@kernel", body: "Decide", summary: "Decision", evidenceRef: "decision.md", humanIntent: "decision" });
+    vi.spyOn(repo, "classifyDestinationOf").mockReturnValue({ class: "unroutable", teaching: "no transport" });
+    const candidate = { ...row, lastNudgeResult: "unroutable: no transport" };
+    expect(repo.isLocalHumanDecisionWithoutGateway(candidate)).toBe(true);
+    expect(repo.isLocalHumanDecisionWithoutGateway({ ...candidate, lastNudgeResult: "failed: connection reset" })).toBe(false);
+    expect(repo.isLocalHumanDecisionWithoutGateway({ ...candidate, destinationSession: "person@external" })).toBe(false);
+    expect(repo.isLocalHumanDecisionWithoutGateway({ ...candidate, humanIntent: "update" })).toBe(false);
+    const broken = new QueueRepository(db, bus, { validateRig: () => true, loadHumanRegistry: () => ({ ok: false, error: "unreadable" }) });
+    expect(broken.isLocalHumanDecisionWithoutGateway(candidate)).toBe(false);
+    const empty = new QueueRepository(db, bus, { validateRig: () => true, loadHumanRegistry: () => ({ ok: false, error: "none", noHumans: true }) });
+    vi.spyOn(empty, "classifyDestinationOf").mockReturnValue({ class: "unroutable", teaching: "no transport" });
+    expect(empty.isLocalHumanDecisionWithoutGateway(candidate)).toBe(true);
+    const registered = new QueueRepository(db, bus, { validateRig: () => true, loadHumanRegistry: () => ({ ok: true, entities: [{} as HumanFragment] }) });
+    expect(registered.isLocalHumanDecisionWithoutGateway(candidate)).toBe(false);
+  });
 
   it("a row whose destination no longer resolves does not stop the other findings, and the pass still reports the failure", async () => {
     // A historic row addressed to a rig that has since gone: admitted when it was created, refused now.

@@ -625,6 +625,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       // pending. Its pickup finding must not be replaced by that historical failure;
       // a separate human notification still needs its own delivery evidence.
       if (!humanNotice && row.claimedAt) continue;
+      if (!humanNotice && deps.queueRepo.isLocalHumanDecisionWithoutGateway(row)) continue;
       const notification = humanNotice ? deps.queueRepo.transitionLog.latestOwnerNotificationForQitem(row.qitemId) : null;
       const resolutionNotice = notification?.ownerNotificationKind === "human-decision-resolved";
       // Match the notification source in slack/queue-access.ts, not the agent wake's escalator.
@@ -688,6 +689,7 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     for (const { qitem_id } of unclaimedRows) {
       const row = deps.queueRepo.getById(qitem_id);
       if (!row || isFindingRow(row)) continue;
+      if (deps.queueRepo.isLocalHumanDecisionWithoutGateway(row)) continue;
       const actionableAt = pendingSince(deps.db, row.qitemId) ?? row.tsCreated;
       if (actionableAt > cutoff) continue;
       // #514 — an ask already posted to its registered human in the current delivery episode waits on

@@ -4412,6 +4412,18 @@ export class QueueRepository {
 
   /** OPR.0.5.6.14 — the one destination-classification seam, as the wake path consults it.
    *  Public for the single-row read route; getById itself stays free of topology reads. */
+  /** A local, unregistered human decision remains on the attention feed; it has no gateway wake to retry.
+   * A broken registry, an external address or any configured person is not evidence of this case. */
+  isLocalHumanDecisionWithoutGateway(row: Pick<QueueItem, "state" | "humanIntent" | "destinationSession" | "lastNudgeResult">): boolean {
+    if (row.state !== "pending" || row.humanIntent === "update" || row.destinationSession !== "human@kernel"
+      || !row.lastNudgeResult?.startsWith("unroutable:")) return false;
+    try {
+      const registry = this.loadHumanRegistryFn();
+      if (registry.ok ? registry.entities.length !== 0 : registry.noHumans !== true) return false;
+      return this.classifyDestinationOf(row.destinationSession).class === "unroutable";
+    } catch { return false; }
+  }
+
   classifyDestinationOf(destinationSession: string): DestinationClass {
     return classifyDestination(destinationSession, {
       entities: (() => {
@@ -4900,9 +4912,11 @@ export class QueueRepository {
       // episode (same predicate as runStuckSweep), so the view must not promise that sweep.
       const posted = view.state === "pending" && this.humanNotificationPostedThisEpisode(qitemId, listed);
       const onSteering = !posted && view.state === "pending" && this.humanAskWithoutAlert(qitemId, listed);
-      const awaitingHuman = posted || onSteering;
+      const row = !posted && !onSteering ? this.db.prepare(`SELECT state, ${this.hasHumanIntentColumn ? "human_intent" : "NULL AS human_intent"}, destination_session, last_nudge_result FROM queue_items WHERE qitem_id = ?`).get(qitemId) as { state: QueueItem["state"]; human_intent: QueueItem["humanIntent"]; destination_session: string; last_nudge_result: string | null } | undefined : undefined;
+      const localOnly = !!row && this.isLocalHumanDecisionWithoutGateway({ state: row.state, humanIntent: row.human_intent, destinationSession: row.destination_session, lastNudgeResult: row.last_nudge_result });
+      const awaitingHuman = posted || onSteering || localOnly;
       if (awaitingHuman) {
-        view.nextBackstop = { owner: view.owner, mechanism: onSteering
+        view.nextBackstop = { owner: view.owner, mechanism: localOnly ? "local attention feed (no registered human gateway)" : onSteering
           ? "none (on Steering for the human, with no Slack alert; awaiting their decision)"
           : "none (posted to the human; awaiting their decision)", dueAt: null, intervalSeconds: null };
       }
