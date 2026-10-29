@@ -1321,10 +1321,9 @@ function isOwnedRelayCommand(cmd: string | undefined): boolean {
   if (!cmd) return false;
   const parsed = parseManagedClaudeNodeCommand(cmd);
   if (!parsed || parsed.args.length !== 1) return false;
-  const relay = parsed.args[0]!;
-  return relay.endsWith("/plugins/openrig-core/hooks/scripts/activity-relay.cjs")
-    || relay.endsWith(LEGACY_OWNED_RELAY_SUFFIX)
-    || relay.endsWith(`/${CLAUDE_ACTIVITY_RELAY_RELATIVE_PATH}`);
+  const relay = nodePath.normalize(parsed.args[0]!);
+  return ["/plugins/openrig-core/hooks/scripts/activity-relay.cjs", LEGACY_OWNED_RELAY_SUFFIX,
+    `/${CLAUDE_ACTIVITY_RELAY_RELATIVE_PATH}`].some(suffix => relay.endsWith(nodePath.normalize(suffix)));
 }
 
 function hashContent(content: string): string {
