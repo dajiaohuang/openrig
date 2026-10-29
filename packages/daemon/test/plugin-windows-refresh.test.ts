@@ -9,7 +9,8 @@ const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
 const assets = path.resolve(import.meta.dirname, "../assets/plugins");
 const manifests = [".claude-plugin/plugin.json", ".codex-plugin/plugin.json"];
-const dependencies = ["hooks/scripts/refocus.cjs", "hooks/scripts/refocus-health.cjs", "hooks/scripts/rig-command.cjs", "hooks/scripts/python-command.cjs"];
+const dependencies = ["hooks/scripts/refocus.cjs", "hooks/scripts/refocus-health.cjs", "hooks/scripts/rig-command.cjs", "hooks/scripts/python-command.cjs", "hooks/scripts/refocus-state-lock.cjs"];
+const bundledVersion = JSON.parse(fs.readFileSync(path.join(assets, "openrig-core", manifests[0]!), "utf8")).version as string;
 
 function fixture(version: string) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "plugin refresh Ω ")); roots.push(root);
@@ -52,7 +53,7 @@ it("upgrades 0.1.21 with the complete refocus dependency tree and preserves repl
   expect(f.listFiles(f.root).sort()).toEqual(before);
 });
 
-it.each(["0.1.22", "9.0.0"])("retains equal/newer installed content at %s", async version => {
+it.each([bundledVersion, "9.0.0"])("retains equal/newer installed content at %s", async version => {
   const f = fixture(version);
   await f.service.ensureVendored("openrig-core");
   expect(fs.readFileSync(path.join(f.target, "hooks", "scripts", "refocus.cjs"), "utf8")).toBe("// previous installed refocus\n");
