@@ -344,7 +344,7 @@ describe("ClaimService FR-3 — adoption-boundary resume-token capture", () => {
     return { rig, node, session: s };
   }
 
-  it("#2279 recovers the prior token only when the live bound Claude process names it", async () => {
+  it("#2279 does not infer the current conversation from unchanged resume argv after an in-app switch", async () => {
     const { node, session } = seedDetachedManagedSeat("claude-code", "dev-driver@test-rig");
     const token = "01a15d9d-bbfc-7559-845f-83cdd04d3f3e";
     sessionRegistry.updateResumeToken(session.id, "claude_id", token, "hook");
@@ -356,7 +356,10 @@ describe("ClaimService FR-3 — adoption-boundary resume-token capture", () => {
     ];
     const result = await buildService().reconcileSession({ sessionName: "dev-driver@test-rig" });
     expect(result.ok).toBe(true);
-    expect(tokenRow(node.id).resume_token).toBe(token);
+    // The process still names A after its conversation has moved to B without a hook.
+    // That indistinguishable observation cannot prove either current identity.
+    expect(tokenRow(node.id).resume_token).toBeNull();
+    if (result.ok) expect(result.result.resumeMetadata?.status).toBe("missing");
     expect(JSON.stringify(result)).not.toContain(token);
     expect(mockTmux.sendText).not.toHaveBeenCalled();
     expect(mockTmux.sendKeys).not.toHaveBeenCalled();

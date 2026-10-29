@@ -10,7 +10,7 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import type { TranscriptStore } from "./transcript-store.js";
 import { startTmuxTranscriptCapture } from "./transcript-capture.js";
 import { deriveResumeToken, type ResumeTokenCaptureDeps } from "./resume-token-capture.js";
-import { verifyClaudePaneProcess, verifyClaudePaneRuntime, verifyCodexPaneProcess, type NativeProcessLister } from "./native-process-lineage.js";
+import { verifyClaudePaneRuntime, verifyCodexPaneProcess, type NativeProcessLister } from "./native-process-lineage.js";
 import {
   observeSolePane,
   paneObservationVerdict,
@@ -648,38 +648,10 @@ export class ClaimService {
       // Pure reads only (sidecar file / pid-keyed log) — consistent with the
       // no-launch/no-input contract above; does NOT touch `continuity`
       // (FR-3 captures a token, it does not assert conversation continuity).
-      let capture = await this.captureResumeTokenOnAdoption({
+      const capture = await this.captureResumeTokenOnAdoption({
         rigId: nodeRow.rig_id, nodeId: nodeRow.id, sessionId, sessionName,
         runtime: nodeRow.runtime,
       });
-      // A prior token is only a candidate: the current foreground Claude must
-      // independently name that same conversation in two stable observations.
-      try {
-      if (nodeRow.runtime === "claude-code" && capture.outcome === "skipped" && capture.reason === "missing_sidecar" && paneObservation.ok) {
-        const prior = this.db.prepare(`SELECT id, resume_token FROM sessions
-          WHERE node_id = ? AND session_name = ? AND id <> ? AND resume_type = 'claude_id'
-          ORDER BY created_at DESC, id DESC LIMIT 1`).get(nodeRow.id, sessionName, sessionId) as
-          { id: string; resume_token: string | null } | undefined;
-        if (prior?.resume_token && validateResumeToken("claude-code", prior.resume_token).ok) {
-          const proof = await verifyClaudePaneProcess({ target: paneObservation.pane, tmux: this.tmuxAdapter,
-            listProcesses: this.listProcesses, expectedToken: prior.resume_token });
-          const paneStillMatches = proof && await this.tmuxAdapter.getPanePid(paneObservation.pane) === proof.panePid;
-          const binding = this.sessionRegistry.getBindingForNode(nodeRow.id);
-          const same = this.db.prepare("SELECT resume_token FROM sessions WHERE id = ? AND node_id = ?").get(prior.id, nodeRow.id) as { resume_token: string | null } | undefined;
-          const current = this.db.prepare("SELECT id, status FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1").get(nodeRow.id) as { id: string; status: string } | undefined;
-          if (paneStillMatches && binding?.tmuxSession === sessionName && binding.tmuxPane === paneObservation.pane
-            && same?.resume_token === prior.resume_token && current?.id === sessionId && current.status === "running"
-            && this.sessionRegistry.updateResumeToken(sessionId, "claude_id", prior.resume_token, "adoption")) {
-            capture = { outcome: "captured", reason: "verified_live_process" };
-            try {
-              this.eventBus.emit({ type: "session.resume_token_captured", rigId: nodeRow.rig_id, nodeId: nodeRow.id,
-                sessionName, sessionId, runtime: "claude-code", outcome: "captured", resumeType: "claude_id",
-                provenance: "adoption", redacted: true });
-            } catch { /* best-effort */ }
-          }
-        }
-      }
-      } catch { /* Reconcile already committed: failed proof must leave the identity unconfirmed. */ }
       const expectedType = resumeTypeForRuntime(nodeRow.runtime);
       let status: ReconcileResumeMetadata["status"] = expectedType ? "unknown" : "not_applicable";
       if (expectedType) {
