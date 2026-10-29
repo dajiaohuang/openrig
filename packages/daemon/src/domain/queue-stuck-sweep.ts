@@ -1,3 +1,4 @@
+import { currentParkedOwnerNoInputFailure } from "./policies/parked-owner-consumer.js";
 import { resolveEscalationOwner, ESCALATION_HOP_TAG, hasConsumedEscalationHop } from "./escalation-owner.js";
 import { findQueueRecovery, recoveryId, recoveryTag } from "./queue-recovery.js";
 import { quietHoldCustody } from "./quiet-hold-custody.js";
@@ -91,6 +92,7 @@ export function resolveLadderSuppressionMinutes(): number {
 }
 
 export type StuckFindingKind =
+  | "parked-owner-no-input"
   | "unconsumed-wait"
   | "overdue-claim"
   | "stalled-after-claim"
@@ -613,6 +615,27 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
       candidates.push({ kind: "unconsumed-wait", row, route: resolveOrch(row.destinationSession, row) ?? row.sourceSession,
         ageMinutes: minutesSince(notice.at, now), evidenceAt: notice.at,
         why: `wait notice delivery=${notice.deliveryStatus}; no later owner response; activity=${ownerActivity?.activity ?? "unknown"}; inspect exact blocker ${row.blockedOn}` });
+    }
+
+    // The parked policy stops repeating a positively no-input failure. Unhealthy blocked rows
+    // have no retry ladder: the same sweep/recovery route owns their actionable disposition.
+    const blockedFailures = deps.db.prepare("SELECT qitem_id FROM queue_items WHERE state='blocked' AND last_nudge_result LIKE 'failed:%'").all() as Array<{ qitem_id: string }>;
+    for (const { qitem_id } of blockedFailures) {
+      const row = deps.queueRepo.getById(qitem_id);
+      if (!row || isFindingRow(row)) continue;
+      const wake = deps.queueRepo.getParkWakeStatus(qitem_id);
+      if ((wake?.live === true && (!wake.unconsumed || wake.recoveryOwner === "queue-stuck-sweep"))
+        || deps.queueRepo.parkWakeServedByOwnReminder(qitem_id)) continue;
+      const transitions = deps.queueRepo.listTransitions(qitem_id);
+      const failure = currentParkedOwnerNoInputFailure(transitions);
+      if (!failure) continue;
+      // Another seat's incidental note is not the owner's response. This kind follows
+      // the parked policy's owner-or-state-change rule, leaving other sweep kinds alone.
+      if (transitions.some((t, i) => t.transitionId > (failure.transitionId ?? Number.POSITIVE_INFINITY)
+        && (t.actorSession === row.destinationSession || t.state !== transitions[i - 1]?.state))) continue;
+      candidates.push({ kind: "parked-owner-no-input", row, route: resolveOrch(row.destinationSession, row) ?? row.sourceSession,
+        ageMinutes: minutesSince(failure.ts, now), evidenceAt: failure.ts,
+        why: `Automated parked-owner reminder refused before input (${failure.code}); repeated input stopped. Inspect the retained quota/guard or route terminal work to an agent. Original blocker remains ${row.blockedOn}` });
     }
 
     // Half 2 — sender-believed-delivered-never-woken. Nobody holds it (the wake failed),
