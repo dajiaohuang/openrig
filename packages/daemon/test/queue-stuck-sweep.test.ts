@@ -126,6 +126,23 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect(repo.waitingView(row.qitemId)?.nextBackstop.mechanism).toContain("local attention feed");
   });
 
+  it("#2278 closes a prior failed-wake finding when the same decision is locally held", async () => {
+    const rigs = new RigRepository(db);
+    const rig = rigs.createRig("kernel");
+    rigs.addNode(rig.id, "operator.agent", { runtime: "terminal" });
+    const row = await repo.create({ sourceSession: "sender@r", destinationSession: "human@kernel", body: "Decide", summary: "Decision", evidenceRef: "decision.md", humanIntent: "decision" });
+    setNudgeResult(row.qitemId, "unroutable: no transport", new Date(Date.now() - 10 * 60_000));
+    ageCreated(row.qitemId, 90);
+    const local = vi.spyOn(repo, "isLocalHumanDecisionWithoutGateway").mockReturnValue(false);
+    await runSweep();
+    const prior = (await findingsFor(row.qitemId)).find(item => item.state === "pending");
+    expect(prior).toBeDefined();
+    local.mockRestore();
+    await runSweep();
+    expect(repo.getById(prior!.qitemId)?.state).toBe("done");
+    expect(repo.getById(row.qitemId)?.state).toBe("pending");
+  });
+
   it("#2278 does not suppress ordinary failures, external addresses, or an unreadable registry", async () => {
     const row = await repo.create({ sourceSession: "sender@r", destinationSession: "human@kernel", body: "Decide", summary: "Decision", evidenceRef: "decision.md", humanIntent: "decision" });
     vi.spyOn(repo, "classifyDestinationOf").mockReturnValue({ class: "unroutable", teaching: "no transport" });

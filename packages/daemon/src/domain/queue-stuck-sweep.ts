@@ -415,6 +415,7 @@ function deliveryResolutionEvidence(
   // An agent's claim/park resolves its failed wake or unclaimed work, not the
   // separate notification owed to a person while that agent is waiting on them.
   if (kind !== "undelivered-human-notice") {
+    if (deps.queueRepo.isLocalHumanDecisionWithoutGateway(row)) return "local kernel decision remains on the attention feed; no gateway wake is configured";
     if (row.claimedAt) return `source claimed at ${row.claimedAt}`;
     if (row.state === "blocked") return "source parked";
     if (kind === "undelivered-wake") {
