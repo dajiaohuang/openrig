@@ -2,6 +2,7 @@ import { selectedCorePluginDir, pluginPathsOf } from "./claude-core-plugin-env.j
 import { deriveRelayEvents, parseManagedClaudeNodeCommand } from "./claude-activity-hooks.js";
 import { claudeActivityRelayPath } from "./claude-activity-hooks.js";
 import { existsSync, accessSync, constants } from "node:fs";
+import { checkWindowsDirectoryWriteAccess } from "./windows-owned-text.js";
 import { isAbsolute, join, normalize, relative, sep } from "node:path";
 import { getCompatibleOpenRigPath } from "../openrig-compat.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
@@ -509,14 +510,16 @@ export class RestoreCheckService {
     const stateDir = getCompatibleOpenRigPath("");
     try {
       // Non-mutating permission probe — no file creation/deletion.
-      // accessSync throws if the directory is not writable.
-      accessSync(stateDir, constants.W_OK);
+      if (process.platform === "win32") checkWindowsDirectoryWriteAccess(stateDir);
+      else accessSync(stateDir, constants.W_OK);
       return { check: "host.state-dir-writable", status: "green", evidence: `${stateDir} is writable`, remediation: "" };
     } catch {
       return {
         check: "host.state-dir-writable", status: "red",
         evidence: `${stateDir} is not writable`,
-        remediation: `Fix permissions: chmod u+w ${stateDir}`,
+        remediation: process.platform === "win32"
+          ? `Inspect the directory permissions in Windows Security properties: ${stateDir}`
+          : `Fix permissions: chmod u+w ${stateDir}`,
       remediationSafe: false,
       };
     }
