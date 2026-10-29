@@ -1309,12 +1309,12 @@ function isOwnedCollectorCommand(cmd: string): boolean {
   if (/[\r\n]/.test(cmd)) return false;
   const parsed = parseManagedClaudeNodeCommand(cmd);
   if (parsed && (parsed.args.length === 2 || parsed.args.length === 3)) {
-    return parsed.args[0]!.endsWith(OWNED_COLLECTOR_SUFFIX);
+    return nodePath.normalize(parsed.args[0]!).endsWith(OWNED_COLLECTOR_SUFFIX);
   }
   const tokens = cmd.trim().split(/\s+/);
   if ((tokens.length !== 3 && tokens.length !== 4) || tokens[0] !== "node") return false;
   if (tokens.some((token) => /[;&|<>`$()'"\\]/.test(token))) return false;
-  return tokens[1]!.endsWith(OWNED_COLLECTOR_SUFFIX);
+  return nodePath.normalize(tokens[1]!).endsWith(OWNED_COLLECTOR_SUFFIX);
 }
 
 function isOwnedRelayCommand(cmd: string | undefined): boolean {
