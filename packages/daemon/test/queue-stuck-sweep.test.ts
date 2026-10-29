@@ -138,6 +138,7 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     const prior = (await findingsFor(row.qitemId)).find(item => item.state === "pending");
     expect(prior).toBeDefined();
     local.mockRestore();
+    expect(repo.waitingView(row.qitemId)?.nextBackstop.mechanism).toContain("local attention feed");
     await runSweep();
     expect(repo.getById(prior!.qitemId)?.state).toBe("done");
     expect(repo.getById(row.qitemId)?.state).toBe("pending");
