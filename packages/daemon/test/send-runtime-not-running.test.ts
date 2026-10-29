@@ -84,6 +84,8 @@ describe("#142 transport refuses to type into a bare shell where an agent runtim
     const result = await watchdogSend(transport, "dev-impl@my-rig");
     expect(result).toMatchObject({ ok: false, sent: false, reason: "target_runtime_unverified" });
     expect(result.error).toContain("Delivery depends on verifying the bound pane and its input-owning agent");
+    expect(result.error).toContain("rig capture <session>");
+    expect(result.error).not.toContain("existing delivery recovery path");
     expect(sendText).not.toHaveBeenCalled();
     expect(sendKeys).not.toHaveBeenCalled();
   });
