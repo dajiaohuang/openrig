@@ -10,6 +10,7 @@ import { prepareHerdrLaunchConfig } from "./herdr-launch-config.js";
 import { openRexView } from "./terminal-window-rex.js";
 import type { FollowControls, OpenViewResult } from "./commands/terminal.js";
 import { readPlatformEnv, renderWindowsLaunch } from "@openrig/daemon/windows-launch";
+import { detachedTerminalEnvironment } from "./terminal-environment.js";
 
 interface Pane { seat: string; label: string; paneCommand: string; recoveryCommand?: string; attachArgv?: string[] }
 interface HerdrTab { workspace_id: string; tab_id: string; label: string }
@@ -34,9 +35,8 @@ export interface WindowDeps {
   notice?(message: string): void;
 }
 
-export function defaultWindowDeps(): WindowDeps {
-  const env = { ...process.env };
-  delete env["TMUX"];
+export function defaultWindowDeps(sourceEnv: NodeJS.ProcessEnv = process.env): WindowDeps {
+  const env = detachedTerminalEnvironment(sourceEnv);
   const run = promisify(execFile);
   return {
     platform: process.platform, env, exists: existsSync,
