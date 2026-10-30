@@ -1,6 +1,5 @@
-// OPR.0.4.4.13 — the host-registry verbs (add / list / doctor — arch
-// R13-2a: no edit/remove/tunnel/bootstrap verbs; hand-editing hosts.yaml
-// remains the path for exotica; the bootstrap ships as script + runbook).
+// Host-registry verbs: add, edit, remove, list, doctor and select.
+// Edit/remove modify only the registry; they do not touch a remote machine.
 // OPR.0.4.6.MH1 FR-1 extends the family with `select` — the persisted
 // host-selection pointer (kubectl current-context shape). The pointer
 // lives in the config twins as `host.selected`; this verb is a THIN
@@ -18,7 +17,7 @@ import { join } from "node:path";
 import { hostname as osHostname, userInfo } from "node:os";
 import { connect } from "node:net";
 import { getOpenRigHome } from "../openrig-compat.js";
-import { addHostEntry, defaultHostRegistryPath, loadHostRegistry, validateHostRegistry, hostDisplayTarget, resolveHost, resolveRemoteBearer, bearerAuthHeaders, type HostEntry, type HttpHostEntry } from "../host-registry.js";
+import { addHostEntry, editHostEntry, removeHostEntry, defaultHostRegistryPath, loadHostRegistry, validateHostRegistry, hostDisplayTarget, resolveHost, resolveRemoteBearer, bearerAuthHeaders, type HostEntry, type HttpHostEntry } from "../host-registry.js";
 import { runCrossHostCommand, type CrossHostResult } from "../cross-host-executor.js";
 import { recordHostObservation, loadHostBindings, describeBindingConflict, defaultHostBindingsPath, type HostObservationOutcome } from "../host-bindings.js";
 import { DaemonClient } from "../client.js";
@@ -587,6 +586,54 @@ export function hostCommand(doctorDepsOverride?: DoctorDeps): Command {
       }
       console.log(`Added host '${res.entry.id}' (${res.entry.transport}) to ${res.path}`);
       printHostNextSteps(res.entry);
+    });
+
+  cmd
+    .command("edit")
+    .description("Edit a host entry without changing its ID or transport")
+    .argument("<id>", "Registered host id")
+    .option("--target <target>", "SSH target")
+    .option("--user <user>", "SSH user")
+    .option("--url <url>", "Remote daemon base URL")
+    .option("--bearer-env <name>", "Bearer environment variable name, not its value")
+    .option("--bearer-file <path>", "Bearer file path, not its value")
+    .option("--notes <text>", "Operator note")
+    .option("--clear-user", "Remove SSH user")
+    .option("--clear-notes", "Remove note")
+    .option("--clear-bearer-env", "Remove bearer environment pointer")
+    .option("--clear-bearer-file", "Remove bearer file pointer")
+    .option("--json", "JSON output")
+    .action((id: string, opts: { target?: string; user?: string; url?: string; bearerEnv?: string; bearerFile?: string; notes?: string; clearUser?: boolean; clearNotes?: boolean; clearBearerEnv?: boolean; clearBearerFile?: boolean; json?: boolean }) => {
+      const patch: Record<string, unknown> = {};
+      for (const [key, value, clear] of [
+        ["target", opts.target, false], ["user", opts.user, opts.clearUser], ["url", opts.url, false],
+        ["bearer_env", opts.bearerEnv, opts.clearBearerEnv], ["bearer_file", opts.bearerFile, opts.clearBearerFile],
+        ["notes", opts.notes, opts.clearNotes],
+      ] as Array<[string, string | undefined, boolean | undefined]>) {
+        if (value !== undefined && clear) { console.error(`Cannot set and clear ${key} together`); process.exitCode = 1; return; }
+        if (clear) patch[key] = null; else if (value !== undefined) patch[key] = value;
+      }
+      if (Object.keys(patch).length === 0) { console.error("No host fields specified"); process.exitCode = 1; return; }
+      const res = editHostEntry(id, patch);
+      if (!res.ok) { console.error(res.error); process.exitCode = 1; return; }
+      const selected = readSelectedHost() === id;
+      const message = selected ? "The selected host was edited; selection is unchanged." : "Host edited; selection is unchanged.";
+      if (opts.json) console.log(JSON.stringify({ ok: true, path: res.path, entry: res.entry, selected, message }));
+      else console.log(`${message} (${id})`);
+    });
+
+  cmd
+    .command("remove")
+    .description("Remove a host entry only; retain credentials, bindings and selection")
+    .argument("<id>", "Registered host id")
+    .option("--json", "JSON output")
+    .action((id: string, opts: { json?: boolean }) => {
+      const res = removeHostEntry(id);
+      if (!res.ok) { console.error(res.error); process.exitCode = 1; return; }
+      const selected = readSelectedHost() === id;
+      const message = selected ? "The selected host was removed; selection is unchanged and must be changed explicitly." : "Host removed; selection and credentials are unchanged.";
+      if (opts.json) console.log(JSON.stringify({ ok: true, path: res.path, entry: res.entry, selected, message }));
+      else console.log(`${message} (${id})`);
     });
 
   cmd

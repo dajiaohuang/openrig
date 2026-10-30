@@ -12,7 +12,7 @@
 // FOREVER; writes flow ONLY through the single parity-pinned write
 // contract (CLI addHostEntry + this twin), reachable daemon-side solely
 // via the narrow named add/pair routes (P1 — no generic registry-write
-// route exists).
+// route exists). Named update/remove routes use corresponding parity-pinned writers.
 //
 // Concurrency (P4): atomic tmp+rename, whole-file LAST-WRITE-WINS on a
 // concurrent add — the ceiling is one operator-scale registry file; NO
@@ -62,5 +62,46 @@ export function addHostEntry(rawEntry: Record<string, unknown>, path: string = d
   } catch (err) {
     return { ok: false, error: `failed to write host registry at ${path}: ${(err as Error).message}` };
   }
+  return { ok: true, path, entry };
+}
+
+/** Edit only declared fields; a null removes an optional field. The host ID and transport never change. */
+export function editHostEntry(id: string, patch: Record<string, unknown>, path: string = defaultHostRegistryPath()): AddHostResult {
+  const loaded = loadHostRegistry(path);
+  if (!loaded.ok) return { ok: false, error: `refusing to modify an invalid or missing registry: ${loaded.error}` };
+  const index = loaded.registry.hosts.findIndex((host) => host.id === id);
+  if (index < 0) return { ok: false, error: `host '${id}' not found` };
+  const current = loaded.registry.hosts[index]!;
+  const allowed = current.transport === "ssh" ? ["target", "user", "notes", "hostId"] : ["url", "bearer_env", "bearer_file", "notes", "hostId"];
+  const invalid = Object.keys(patch).find((key) => !allowed.includes(key));
+  if (invalid) return { ok: false, error: `field '${invalid}' cannot be edited` };
+  const changed: Record<string, unknown> = { ...current };
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === null) delete changed[key]; else changed[key] = value;
+  }
+  const hosts = [...loaded.registry.hosts];
+  hosts[index] = changed as unknown as HostEntry;
+  const validated = validateHostRegistry({ hosts }, path);
+  if (!validated.ok) return { ok: false, error: validated.error };
+  try {
+    const tmp = join(dirname(path), `.hosts.yaml.tmp-${process.pid}`);
+    writeFileSync(tmp, stringifyYaml({ hosts: validated.registry.hosts }), { mode: 0o600 });
+    renameSync(tmp, path);
+  } catch (err) { return { ok: false, error: `failed to write host registry at ${path}: ${(err as Error).message}` }; }
+  return { ok: true, path, entry: validated.registry.hosts[index]! };
+}
+
+/** Remove the registry entry only; credentials, learned identity and selection are not touched. */
+export function removeHostEntry(id: string, path: string = defaultHostRegistryPath()): AddHostResult {
+  const loaded = loadHostRegistry(path);
+  if (!loaded.ok) return { ok: false, error: `refusing to modify an invalid or missing registry: ${loaded.error}` };
+  const entry = loaded.registry.hosts.find((host) => host.id === id);
+  if (!entry) return { ok: false, error: `host '${id}' not found` };
+  const hosts = loaded.registry.hosts.filter((host) => host.id !== id);
+  try {
+    const tmp = join(dirname(path), `.hosts.yaml.tmp-${process.pid}`);
+    writeFileSync(tmp, stringifyYaml({ hosts }), { mode: 0o600 });
+    renameSync(tmp, path);
+  } catch (err) { return { ok: false, error: `failed to write host registry at ${path}: ${(err as Error).message}` }; }
   return { ok: true, path, entry };
 }

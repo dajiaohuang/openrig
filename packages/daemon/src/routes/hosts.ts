@@ -1,7 +1,5 @@
-// OPR.0.4.6.MH1 FR-5/FR-6 — THE narrow named host add/pair route family
-// (arch B1 ruling, pin P1: host add + the pair handshake ONLY — no
-// generic registry-write route exists, remove/edit stay out of scope;
-// the daemon reader module stays read-only-forever).
+// Named host add, edit, remove and pair routes. Writes use the parity-pinned
+// writer; the daemon reader remains read-only. There is no generic registry-write route.
 //
 // Surface map:
 //   POST /api/hosts/pair-request      TARGET side, OPEN (pre-token
@@ -41,7 +39,7 @@ import { randomUUID, randomInt } from "node:crypto";
 import { connect } from "node:net";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 import { getOpenRigHome } from "../openrig-compat.js";
-import { addHostEntry } from "../domain/hosts/hosts-registry-writer.js";
+import { addHostEntry, editHostEntry, removeHostEntry } from "../domain/hosts/hosts-registry-writer.js";
 import { defaultHostRegistryPath, loadHostRegistry, validateHostRegistry, type HostEntry } from "../domain/hosts/hosts-registry-reader.js";
 import type { SettingsStore } from "../domain/user-settings/settings-store.js";
 import type { QueueRepository } from "../domain/queue-repository.js";
@@ -89,6 +87,8 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
   // bearer is configured, pass-through on loopback/tailnet-trust daemons.
   const requireAuth = authBearerTokenMiddleware({ expectedToken: bearerToken });
   router.use("/add", requireAuth);
+  router.use("/update", requireAuth);
+  router.use("/remove", requireAuth);
   router.use("/pair", requireAuth);
   router.use("/pair/:pairId", requireAuth);
 
@@ -245,6 +245,32 @@ export function hostsRoutes(opts?: { bearerToken?: string | null; humanRegistry?
   // ---------------------------------------------------------------------
   // LOCAL side: the dashboard's add + pair-client seams.
   // ---------------------------------------------------------------------
+
+  router.post("/update", async (c) => {
+    const body = await c.req.json<Record<string, unknown>>().catch(() => null);
+    if (!body || typeof body.id !== "string" || Object.keys(body).some((key) => key !== "id" && key !== "patch") || !body.patch || typeof body.patch !== "object" || Array.isArray(body.patch)) {
+      return c.json({ error: "invalid_host_entry", message: "body requires id and patch object" }, 400);
+    }
+    const res = editHostEntry(body.id, body.patch as Record<string, unknown>);
+    if (!res.ok) return c.json({ error: "invalid_host_entry", message: res.error }, 400);
+    const store = c.get("settingsStore" as never) as SettingsStore | undefined;
+    const selected = (store?.resolveOne("host.selected").value as string | undefined) ?? "local";
+    return c.json({ ok: true, entry: res.entry, path: res.path, selected: selected === body.id,
+      message: selected === body.id ? "The selected host was edited; selection is unchanged." : "Host edited; selection is unchanged." });
+  });
+
+  router.post("/remove", async (c) => {
+    const body = await c.req.json<Record<string, unknown>>().catch(() => null);
+    if (!body || typeof body.id !== "string" || Object.keys(body).some((key) => key !== "id")) {
+      return c.json({ error: "invalid_host_entry", message: "body requires only a host id" }, 400);
+    }
+    const res = removeHostEntry(body.id);
+    if (!res.ok) return c.json({ error: "invalid_host_entry", message: res.error }, 400);
+    const store = c.get("settingsStore" as never) as SettingsStore | undefined;
+    const selected = (store?.resolveOne("host.selected").value as string | undefined) ?? "local";
+    return c.json({ ok: true, entry: res.entry, path: res.path, selected: selected === body.id,
+      message: selected === body.id ? "The selected host was removed; selection is unchanged and must be changed explicitly." : "Host removed; selection and credentials are unchanged." });
+  });
 
   router.post("/add", async (c) => {
     const body = (await c.req.json<Record<string, unknown>>().catch(() => null));

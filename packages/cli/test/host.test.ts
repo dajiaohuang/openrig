@@ -47,6 +47,24 @@ describe("rig host add/list", () => {
     return prog.parseAsync(["node", "rig", "host", ...argv]);
   }
 
+  it("#2128 edit and remove retain selected host and credential files", async () => {
+    const tokenFile = path.join(dir, "token");
+    const bindingFile = path.join(dir, "host-bindings.json");
+    fs.writeFileSync(tokenFile, "private-fixture");
+    fs.writeFileSync(bindingFile, "unchanged-fixture");
+    vi.stubEnv("OPENRIG_HOST_SELECTED", "remote");
+    try {
+      await capture(() => run(["add", "--id", "remote", "--transport", "http", "--url", "https://old.example", "--bearer-file", tokenFile]));
+      const edit = await capture(() => run(["edit", "remote", "--url", "https://new.example", "--json"]));
+      expect(JSON.parse(edit.out[0]!)).toMatchObject({ selected: true, entry: { id: "remote", url: "https://new.example", bearer_file: tokenFile } });
+      const remove = await capture(() => run(["remove", "remote", "--json"]));
+      expect(JSON.parse(remove.out[0]!)).toMatchObject({ selected: true, message: expect.stringContaining("selection is unchanged") });
+      expect(fs.readFileSync(tokenFile, "utf8")).toBe("private-fixture");
+      expect(fs.readFileSync(bindingFile, "utf8")).toBe("unchanged-fixture");
+      expect(process.env.OPENRIG_HOST_SELECTED).toBe("remote");
+    } finally { vi.unstubAllEnvs(); }
+  });
+
   it("add writes the entry and teaches the doctor next step", async () => {
     const { out, exitCode } = await capture(() => run(["add", "--id", "vps-1", "--transport", "ssh", "--target", "vps-1.tailnet", "--user", "openrig"]));
     expect(exitCode).toBeUndefined();

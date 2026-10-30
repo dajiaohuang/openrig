@@ -348,6 +348,8 @@ the sections that were not read are `null`.
 |---|---|---|
 | `rig host` | — | — |
 | `rig host add` | — | `--id <id>` **required**<br>`--transport <transport>` **required**<br>`--target <target>`<br>`--user <user>`<br>`--url <url>`<br>`--bearer-env <name>`<br>`--bearer-file <path>`<br>`--notes <text>`<br>`--json` |
+| `rig host edit` | `<id>` | `--target <target>`<br>`--user <user>`<br>`--url <url>`<br>`--bearer-env <name>`<br>`--bearer-file <path>`<br>`--notes <text>`<br>`--clear-user`<br>`--clear-notes`<br>`--clear-bearer-env`<br>`--clear-bearer-file`<br>`--json` |
+| `rig host remove` | `<id>` | `--json` |
 | `rig host select <id>` | — | `--json` |
 | `rig host rename <name>` | — | `--json` |
 | `rig host pair <url>` | — | `--id <id>`<br>`--timeout <seconds>`<br>`--human <address>`<br>`--json` |

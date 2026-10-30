@@ -32,8 +32,8 @@ import { queueItemEvidenceRefSchema } from "../src/db/migrations/048_queue_item_
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { isHumanSeatSessionRef, parseSessionName } from "../src/domain/session-name.js";
-import { addHostEntry as daemonAddHostEntry } from "../src/domain/hosts/hosts-registry-writer.js";
-import { addHostEntry as cliAddHostEntry } from "../../cli/src/host-registry.js";
+import { addHostEntry as daemonAddHostEntry, editHostEntry as daemonEditHostEntry, removeHostEntry as daemonRemoveHostEntry } from "../src/domain/hosts/hosts-registry-writer.js";
+import { addHostEntry as cliAddHostEntry, editHostEntry as cliEditHostEntry, removeHostEntry as cliRemoveHostEntry } from "../../cli/src/host-registry.js";
 import type { HumanFragment, LoadResult } from "../src/domain/gateway/human-registry.js";
 import { hostsRoutes } from "../src/routes/hosts.js";
 
@@ -68,6 +68,36 @@ describe("hosts-registry writer twin — P3 byte parity with the CLI addHostEntr
     { id: "vps-b", transport: "http", url: "http://vps-b:7433", bearer_env: "VPS_B_TOKEN" },
     { id: "vps-c", transport: "http", url: "http://vps-c:7433", bearer_file: "/tmp/tok", notes: "paired 2026-07-07" },
   ];
+
+  it("#2128 edit and remove keep CLI/daemon bytes and refuse invalid writes", () => {
+    const pathA = join(dirA, "hosts.yaml");
+    const pathB = join(dirB, "hosts.yaml");
+    for (const entry of SEQUENCE) {
+      expect(cliAddHostEntry(entry, pathA).ok).toBe(true);
+      expect(daemonAddHostEntry(entry, pathB).ok).toBe(true);
+    }
+    expect(cliEditHostEntry("vps-b", { url: "https://new.example", bearer_env: null, bearer_file: "/tmp/new-token", notes: "edited" }, pathA).ok).toBe(true);
+    expect(daemonEditHostEntry("vps-b", { url: "https://new.example", bearer_env: null, bearer_file: "/tmp/new-token", notes: "edited" }, pathB).ok).toBe(true);
+    expect(readFileSync(pathB, "utf8")).toBe(readFileSync(pathA, "utf8"));
+    const before = readFileSync(pathA, "utf8");
+    for (const patch of [{ id: "other" }, { transport: "ssh" }, { token: "fixture-secret" }, { url: "" }]) {
+      expect(cliEditHostEntry("vps-b", patch, pathA).ok).toBe(false);
+      expect(daemonEditHostEntry("vps-b", patch, pathB).ok).toBe(false);
+    }
+    expect(readFileSync(pathA, "utf8")).toBe(before);
+    expect(readFileSync(pathB, "utf8")).toBe(before);
+    expect(cliRemoveHostEntry("vm-a", pathA).ok).toBe(true);
+    expect(daemonRemoveHostEntry("vm-a", pathB).ok).toBe(true);
+    expect(readFileSync(pathB, "utf8")).toBe(readFileSync(pathA, "utf8"));
+    expect(cliRemoveHostEntry("missing", pathA).ok).toBe(false);
+    expect(daemonRemoveHostEntry("missing", pathB).ok).toBe(false);
+    writeFileSync(pathA, "not a valid registry");
+    writeFileSync(pathB, "not a valid registry");
+    expect(cliRemoveHostEntry("vps-b", pathA).ok).toBe(false);
+    expect(daemonRemoveHostEntry("vps-b", pathB).ok).toBe(false);
+    expect(readFileSync(pathA, "utf8")).toBe("not a valid registry");
+    expect(readFileSync(pathB, "utf8")).toBe("not a valid registry");
+  });
 
   it("same entry sequence in → identical yaml bytes out", () => {
     const pathA = join(dirA, "hosts.yaml");
@@ -145,6 +175,32 @@ describe("POST /api/hosts/add — the narrow named add seam", () => {
     }
   });
 
+  it("#2128 edit/remove routes require bearer and never accept secrets", async () => {
+    const headers = { "Content-Type": "application/json" };
+    expect(daemonAddHostEntry({ id: "remote", transport: "http", url: "https://old.example", bearer_env: "TOKEN_POINTER" }).ok).toBe(true);
+    const call = (path: string, body: unknown, authorized = true) => app.request(path, {
+      method: "POST", headers: authorized ? auth : headers, body: JSON.stringify(body),
+    });
+    expect((await call("/api/hosts/update", { id: "remote", patch: { url: "https://new.example" } }, false)).status).toBe(401);
+    expect((await call("/api/hosts/remove", { id: "remote" }, false)).status).toBe(401);
+    expect((await call("/api/hosts/update", { id: "remote", patch: { token: "fixture-secret" } })).status).toBe(400);
+    expect((await call("/api/hosts/update", { id: "remote", patch: {}, token: "fixture-secret" })).status).toBe(400);
+    expect((await call("/api/hosts/update", { id: "remote", patch: { url: "https://new.example" } })).status).toBe(200);
+    const edited = cliEditHostEntry("remote", { notes: "verify" });
+    expect(edited.ok && edited.entry.transport === "http" && edited.entry.url).toBe("https://new.example");
+    expect((await call("/api/hosts/remove", { id: "remote" })).status).toBe(200);
+    expect((await call("/api/hosts/remove", { id: "remote" })).status).toBe(400);
+  });
+
+  it("#2128 edit/remove allow a tokenless daemon without changing the auth policy", async () => {
+    const tokenless = buildApp(new QueueRepository(db, new EventBus(db), { validateRig: () => true }), null);
+    expect(daemonAddHostEntry({ id: "remote", transport: "ssh", target: "old" }).ok).toBe(true);
+    const update = await tokenless.request("/api/hosts/update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: "remote", patch: { target: "new" } }) });
+    expect(update.status).toBe(200);
+    const remove = await tokenless.request("/api/hosts/remove", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: "remote" }) });
+    expect(remove.status).toBe(200);
+  });
+
   it("writes a valid entry through the writer twin and the CLI-visible registry file", async () => {
     const res = await app.request("/api/hosts/add", {
       method: "POST",
@@ -190,12 +246,9 @@ describe("POST /api/hosts/add — the narrow named add seam", () => {
     expect(res.status).toBe(401);
   });
 
-  // rev1-r1 D: P1's "no generic registry-write route" pinned as a
-  // NEGATIVE — the surface is exactly add + the pair handshake; anything
-  // remove/edit-shaped does not exist.
-  it("R1-D: no generic registry-write route exists (remove/edit/PUT/DELETE all 404)", async () => {
+  // #2128 adds named update/remove routes, not a generic registry-write route.
+  it("no generic registry-write route exists", async () => {
     for (const [method, url] of [
-      ["POST", "/api/hosts/remove"],
       ["POST", "/api/hosts/edit"],
       ["PUT", "/api/hosts"],
       ["PUT", "/api/hosts/vps-a"],
