@@ -2238,8 +2238,8 @@ export class PodRigInstantiator {
 
   /** Store the rig culture file and rig startup block the spec declares, with the absolute root they resolve against. */
   private persistRigStartupLayers(rigId: string, rigSpec: PodRigSpec, rigRoot: string): void {
-    const podStartupFiles: Record<string, StartupFile[]> = {};
-    const podStartupActions: Record<string, import("./types.js").StartupBlock["actions"]> = {};
+    const podStartupFiles: Record<string, StartupFile[]> = Object.create(null);
+    const podStartupActions: Record<string, import("./types.js").StartupBlock["actions"]> = Object.create(null);
     for (const pod of rigSpec.pods) {
       if (pod.startup?.files.length) podStartupFiles[pod.id] = pod.startup.files;
       if (pod.startup?.actions.length) podStartupActions[pod.id] = pod.startup.actions;
