@@ -177,7 +177,10 @@ export function composeView(
         ...(m.runtime ? { runtime: m.runtime } : {}),
         label: m.label,
         paneCommand: `ssh ${shellQuote(dest)} ${shellQuote(remoteCommand)}`,
-        recoveryCommand: `ssh ${shellQuote(dest)} ${shellQuote(`tmux attach ${attachFlag}-t ${shellQuote(m.tmuxSession)}`)}`,
+        recoveryCommand: ctx.localPlatform === "win32"
+          ? "& " + ["ssh", "-t", dest, `tmux attach ${attachFlag}-t ${shellQuote(m.tmuxSession)}`].map(powershellQuote).join(" ")
+          : `ssh ${shellQuote(dest)} ${shellQuote(`tmux attach ${attachFlag}-t ${shellQuote(m.tmuxSession)}`)}`,
+        ...(ctx.localPlatform === "win32" ? { recoveryShell: "powershell" as const } : {}),
         readOnly: m.readOnly,
       });
       continue;
@@ -211,6 +214,7 @@ export function composeView(
         ? "& " + [ctx.localTmux ?? "tmux", ...(ctx.localTmuxServer ?? []), "attach",
           ...(m.readOnly ? ["-r"] : ["-f", "ignore-size"]), "-t", m.tmuxSession].map(powershellQuote).join(" ")
         : `${localTmux} attach ${attachFlag}-t ${shellQuote(m.tmuxSession)}`,
+      ...(ctx.localPlatform === "win32" ? { recoveryShell: "powershell" as const } : {}),
       attachArgv,
       readOnly: m.readOnly,
     });
