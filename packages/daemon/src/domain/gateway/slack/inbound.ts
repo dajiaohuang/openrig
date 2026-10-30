@@ -363,8 +363,9 @@ export class InboundRouter {
       const correlated = route.correlationQitemId ? this.deps.queue.getQitem?.(route.correlationQitemId) : null;
       // Keep guidance in the attribution footer, not the person's answer (which is extracted above it).
       // Apply it on replay too, so the durable answer's event footer remains identical.
+      const guidance = "Read the person's words; closing the decision does not mean approval.";
       const body = !asChannel && correlated?.humanIntent === "decision" && correlated.humanQuestions?.length
-        ? `${incomingBody}\nRead the person's words; closing the decision does not mean approval.`
+        ? `${incomingBody}\n${guidance}`
         : incomingBody;
       // A question parked on the person it asked takes their reply after its current question as the answer, as a click.
       const parkOpen = correlated?.state === "blocked" && route.correlationQitemId !== undefined
@@ -379,11 +380,16 @@ export class InboundRouter {
       const consumedKey = (answerId: string) => `answer-event:${JSON.stringify([eventId, route.correlationQitemId, who.source, answerId])}`;
       // A closed ask can hold several returned answers (one per park). A replay finds the one this event returned, or the
       // one it was absorbed into.
-      const footerAt = body.lastIndexOf("\n\n---\n");
+      const footerAt = incomingBody.lastIndexOf("\n\n---\n");
+      const matchesEventFooter = (savedBody: string) => {
+        if (footerAt < 0) return false;
+        const footer = incomingBody.slice(footerAt);
+        return savedBody.endsWith(footer) || savedBody.endsWith(`${footer}\n${guidance}`);
+      };
       const ownClosedAnswer = () => {
         const answers = this.deps.queue.listHumanAnswers?.(route.correlationQitemId!, who.source) ?? [];
         const seen = this.deps.seen.load();
-        return answers.find((answer) => footerAt >= 0 && answer.body.endsWith(body.slice(footerAt)))
+        return answers.find((answer) => matchesEventFooter(answer.body))
           ?? answers.find((answer) => seen.has(consumedKey(answer.qitemId))) ?? null;
       };
       const committedAnswer = !answerable ? null
@@ -393,7 +399,7 @@ export class InboundRouter {
       const absorbedEventKey = committedAnswer ? consumedKey(committedAnswer.qitemId) : null;
       // The footer covers the original typed answer; the marker covers a later event absorbed before close.
       const replayedAnswer = (closed || resumedPark) && committedAnswer && (
-        committedAnswer.body.endsWith(body.slice(body.lastIndexOf("\n\n---\n"))) ||
+        matchesEventFooter(committedAnswer.body) ||
         (absorbedEventKey && this.deps.seen.load().has(absorbedEventKey))
       ) ? committedAnswer : null;
       // A different event after close remains conversation; only the pending ask coalesces other retries.
