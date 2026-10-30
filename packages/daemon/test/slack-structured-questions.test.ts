@@ -159,7 +159,8 @@ describe("structured human questions (#193)", () => {
       const { text } = render();
       for (const s of ["Which database?", "Postgres (recommended)", "SQLite", "Ship this week?", "Yes", "No"]) expect(text).toContain(s);
       expect(text).toMatch(/reply in this thread/i);
-      expect(JSON.stringify(render().blocks)).toMatch(/reply in this thread/i);
+      expect(text).toContain("A typed reply closes the decision");
+      expect(JSON.stringify(render().blocks)).toContain("A typed reply closes the decision");
     });
 
     it("escapes question and option text like any other queue-authored field", () => {
@@ -520,6 +521,7 @@ describe("structured human questions (#193)", () => {
       );
       expect(repliesToSeat()).toHaveLength(1);
       expect(repliesToSeat()[0]?.body).toContain(text);
+      expect(repliesToSeat()[0]?.body).toContain("Read the person's words; closing the decision does not mean approval.");
     });
 
     it("preserves a previous button answer when the remaining question gets a typed reply", async () => {

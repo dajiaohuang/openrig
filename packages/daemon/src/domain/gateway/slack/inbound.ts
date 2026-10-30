@@ -357,10 +357,15 @@ export class InboundRouter {
       if (!isCurrent()) return { landed: false, reason: "inactive" };
       // S10 — deterministic route (thread map) when wired; static destination otherwise.
       const route = this.deps.resolveRoute?.(ev) ?? { destination: this.deps.destination };
-      const { summary, body, attachmentsChars } = this.summaryOf(ev, who.source, transfer, route.correlationQitemId, who.sharedChannel?.envelope);
+      const { summary, body: incomingBody, attachmentsChars } = this.summaryOf(ev, who.source, transfer, route.correlationQitemId, who.sharedChannel?.envelope);
       // A person's top-level message (not a reply in a thread) becomes the root its answer lands under.
       const mintsRoot = Boolean(this.deps.mintThread && ev.channel && (!ev.thread_ts || ev.thread_ts === ev.ts));
       const correlated = route.correlationQitemId ? this.deps.queue.getQitem?.(route.correlationQitemId) : null;
+      // Keep guidance in the attribution footer, not the person's answer (which is extracted above it).
+      // Apply it on replay too, so the durable answer's event footer remains identical.
+      const body = !asChannel && correlated?.humanIntent === "decision" && correlated.humanQuestions?.length
+        ? `${incomingBody}\nRead the person's words; closing the decision does not mean approval.`
+        : incomingBody;
       // A question parked on the person it asked takes their reply after its current question as the answer, as a click.
       const parkOpen = correlated?.state === "blocked" && route.correlationQitemId !== undefined
         && this.deps.queue.answersPark?.(route.correlationQitemId, who.source, ev.ts) === true;
