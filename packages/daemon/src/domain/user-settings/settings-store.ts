@@ -1112,7 +1112,8 @@ export class SettingsStore {
     const fileVal = getNestedValue(fc, KEY_TO_PATH[key]);
     if (fileVal !== undefined && fileVal !== null && fileVal !== "") {
       const legacyDefault = deriveLegacyWorkspaceDefault(key, wr);
-      if (legacyDefault !== null && fileVal === legacyDefault) {
+      if (legacyDefault !== null && (fileVal === legacyDefault
+        || (process.platform === "win32" && typeof fileVal === "string" && path.normalize(fileVal) === path.normalize(legacyDefault)))) {
         return { value: defaultValue, source: "default", defaultValue };
       }
       // Validate the file-source value too. Hand-edited config.json
@@ -1219,7 +1220,7 @@ export class SettingsStore {
     // target. Opening without truncation also checks native ACL permissions.
     if (existing) closeSync(openSync(target, "r+"));
     let stagingDirectory: string | undefined;
-    let temporary = `${target}.tmp-${randomUUID()}`;
+    let temporary = path.join(path.dirname(target), `.openrig.tmp-${randomUUID()}`);
     let owned = false;
     let canFallBack = true;
     try {
