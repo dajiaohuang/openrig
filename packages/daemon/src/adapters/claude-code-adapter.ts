@@ -1,5 +1,6 @@
 import { withManagedRestoreReads, type RestoreReadPolicy } from "../domain/managed-restore-read-access.js";
 import { operationalLaunchArgs } from "./kernel-authority.js";
+import { claudeMcpArgs } from "../domain/claude-mcp.js";
 import { claudeSeatTokenFallbackNotice } from "../domain/claude-seat-token.js";
 import nodePath from "node:path";
 import fs from "node:fs";
@@ -48,6 +49,29 @@ export interface ClaudeAdapterFsOps {
 }
 
 const SHELL_COMMANDS = new Set(["bash", "fish", "nu", "sh", "tmux", "zsh"]);
+
+/** #2277: the shell's own not-found line for the launched Claude, from the last lines of a pane back at its shell: bash's
+ *  `claude: command not found`, sh's `claude: not found`, zsh's `command not found: claude`, or `No such file or directory`
+ *  naming exactly the launch's executable (a managed launch runs its resolved path, which can be a versioned file). */
+function claudeNotFoundLine(paneContent: string, executable: string | undefined): string | null {
+  return paneContent.split("\n").map((line) => line.trim()).filter(Boolean).slice(-6).reverse().find((line) => {
+    if (/(?:^|[\s:])claude: (?:command )?not found$/.test(line) || /command not found: claude$/.test(line)) return true;
+    const missing = missingFileOperand(line);
+    return missing !== undefined && (executable ? missing === executable : missing.endsWith("/claude"));
+  }) ?? null;
+}
+
+/** The path a missing-file line names, whole: `<prog>: <path>: No such file or directory` (bash, sh, env, which may quote
+ *  it) or zsh's `zsh: no such file or directory: <path>`. */
+function missingFileOperand(line: string): string | undefined {
+  const operand = /^\S+: (?:line \d+: )?(.+): No such file or directory$/.exec(line)?.[1] ?? /^\S+: no such file or directory: (.+)$/.exec(line)?.[1];
+  return operand?.replace(/^['‘]|['’]$/g, "");
+}
+
+function claudeNotFoundReason(line: string): string {
+  return `the pane shows that claude wasn't found (${line}). If that line is from this launch, Claude Code may have been updating or `
+    + "being reinstalled at that moment; relaunch this seat once claude is back.";
+}
 
 /**
  * Claude Code runtime adapter. Projects resources to .claude/ targets
@@ -259,6 +283,15 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     opts: { name: string; resumeToken?: string; forkSource?: import("../domain/runtime-adapter.js").ForkSource; freshInPlace?: boolean; beforeNativeDispatch?: () => boolean },
   ): Promise<HarnessLaunchResult> {
     binding = { ...binding };
+    if (binding.accountHome !== undefined && (!this.claudeManagedLaunch || !this.seatLaunchEnvironment)) {
+      return { ok: false, error: "Isolated account-home launch support is unavailable; no agent started." };
+    }
+    const accountHome = binding.accountHome !== undefined ? binding.accountHome : this.claudeManagedLaunch?.accountHome?.(binding.nodeId);
+    if (accountHome) {
+      try { this.claudeManagedLaunch!.assertAccountHome(binding.nodeId, accountHome, binding.accountHome ? binding.accountToken ?? null : undefined); }
+      catch (error) { return { ok: false, error: (error as Error).message }; }
+    }
+    const claudeCommand = binding.claudeExecutable ? `exec ${shellQuote(binding.claudeExecutable)}` : "claude";
     this.autoLaunches.delete(binding.nodeId);
     opts = { ...opts, ...(opts.forkSource ? { forkSource: { ...opts.forkSource } } : {}) };
     if (!binding.tmuxSession) {
@@ -277,15 +310,24 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       try {
         if (!this.claudeManagedLaunch) await unresolvedClaudePermissionModes();
         managed = await this.claudeManagedLaunch!.prepare({ nodeId: binding.nodeId, cwd: binding.cwd,
+          ...(binding.claudeExecutable ? { executable: binding.claudeExecutable } : {}),
           session: binding.tmuxSession, pane: binding.tmuxPane, generation: binding.launchGeneration,
+          ...(binding.accountHome !== undefined ? { accountHome: binding.accountHome, accountToken: binding.accountHome === null ? binding.accountToken : binding.accountToken ?? null } : {}),
           ...(binding.runtimeSwitchFrom ? { runtimeSwitch: { fromRuntime: binding.runtimeSwitchFrom.runtime, session: binding.runtimeSwitchFrom.session,
             pane: binding.runtimeSwitchFrom.pane, generation: binding.runtimeSwitchFrom.generation } } : {}) }, binding.permissionMode);
       } catch (error) { return { ok: false, error: (error as Error).message }; }
     }
     // A seat's own subscription token: the managed launch carries it; the classic launch gets its step in the staged
-    // subshell. A launch that can't apply it still starts, and says so.
-    const seatToken = managed ? null : this.claudeManagedLaunch?.seatTokenLaunch?.(binding.nodeId) ?? null;
+    // subshell. Subscription-token fallback is reported; an unusable API key refuses the launch.
+    let seatToken: ReturnType<ClaudeManagedLaunch["seatTokenLaunch"]> = null;
+    if (!managed) {
+      try {
+        seatToken = this.claudeManagedLaunch?.seatTokenLaunch?.(binding.nodeId,
+          binding.accountHome !== undefined ? { accountHome: binding.accountHome, ref: binding.accountHome === null ? binding.accountToken : binding.accountToken ?? null, required: !!binding.accountHome } : {}) ?? null;
+      } catch (error) { return { ok: false, error: (error as Error).message }; }
+    }
     const tokenWarnings: string[] = [...(managed?.warnings ?? seatToken?.warnings ?? [])];
+    if (seatToken) tokenWarnings.push(...(await this.claudeManagedLaunch?.tokenPrecedenceWarnings?.(binding.nodeId, seatToken.ref) ?? []));
     const session = binding.tmuxSession;
     const assertSelected = opts.beforeNativeDispatch ? () => {
       if (!opts.beforeNativeDispatch!()) throw new Error("Selected history changed before Claude input");
@@ -293,13 +335,15 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const beforeManagedInput = opts.beforeNativeDispatch ? () => { assertSelected?.(); managed?.assertCurrent?.(); } : managed?.assertCurrent;
     const sendClassic = async (cmd: string) => {
       if (!this.seatLaunchEnvironment) {
+        if (seatToken?.ref.kind === "api-key") return { ok: false as const, code: "api_key_unavailable", message: "This launch cannot apply the selected API key; no Claude process started." };
         if (seatToken) tokenWarnings.push(this.claudeManagedLaunch?.tokenNotApplied?.(binding.nodeId, seatToken.ref, "this launch path can't run the token step") ?? claudeSeatTokenFallbackNotice(seatToken.ref, "this launch path can't run the token step"));
         if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return { ok: false as const, code: "selection_changed", message: "Selected history changed before Claude input" };
         return assertSelected ? this.tmux.sendText(session, cmd, assertSelected) : this.tmux.sendText(session, cmd);
       }
       const staged = await this.seatLaunchEnvironment.command(session, cmd, { nodeId: binding.nodeId, generation: binding.launchGeneration,
-        runtime: this.runtime, ...(seatToken ? { claudeTokenStep: seatToken.step } : {}) });
+        runtime: this.runtime, ...(binding.accountHome !== undefined ? { accountHome: binding.accountHome } : {}), ...(seatToken ? { claudeTokenStep: seatToken.step } : {}) });
       if (seatToken && !staged.includes(seatToken.step)) {
+        if (seatToken.ref.kind === "api-key") return { ok: false as const, code: "api_key_unavailable", message: "This pane cannot apply the selected API key; no Claude process started." };
         tokenWarnings.push(this.claudeManagedLaunch?.tokenNotApplied?.(binding.nodeId, seatToken.ref, "the seat's pane shell can't run the token step") ?? claudeSeatTokenFallbackNotice(seatToken.ref, "the seat's pane shell can't run the token step"));
       }
       if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return { ok: false as const, code: "selection_changed", message: "Selected history changed before Claude input" };
@@ -329,6 +373,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const effortArg = effort ? ` --effort ${shellQuote(effort)}` : "";
     const advisor = binding.advisor?.trim();
     const advisorArg = advisor ? ` --advisor ${shellQuote(advisor)}` : "";
+    const mcpArgs = claudeMcpArgs(binding.claudeMcp);
+    const mcpArg = mcpArgs.map(arg => ` ${shellQuote(arg)}`).join("");
     // OPR.0.7.0.9: the seat's own additions, after the model, effort and Advisor and before the identity options.
     const additionArgs = seatLaunchAdditionArgs(binding.launchAdditions);
     const additionArg = additionArgs.map((arg, index) => ` ${index % 2 === 0 ? arg : shellQuote(arg)}`).join(""); // flag, value pairs
@@ -351,12 +397,12 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       const forkSessionId = this.sessionIdFactory();
       const launchArgs = permissionArgs(forkSessionId);
       const permissionMode = permissionArg(launchArgs);
-      const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...additionArgs,
+      const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...mcpArgs, ...additionArgs,
         "--resume", parentId, "--fork-session", "--session-id", forkSessionId, "--name", opts.name])
         // The non-managed command text is parsed by the pane shell, so the
         // parent id needs the same quoting as --model/--effort above (and as
         // the codex fork path) — a hostile id must not leave --resume.
-        : `${rendererPrefix}claude ${permissionMode}${modelArg}${effortArg}${advisorArg}${additionArg} --resume ${shellQuote(parentId)} --fork-session --session-id ${forkSessionId} --name ${opts.name}`;
+        : `${rendererPrefix}${claudeCommand} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --resume ${shellQuote(parentId)} --fork-session --session-id ${forkSessionId} --name ${opts.name}`;
       const textResult = managed ? await this.tmux.sendShellCommand(binding.tmuxSession, cmd, managed.assertCurrent)
         : await sendClassic(cmd);
       if (!textResult.ok) {
@@ -374,11 +420,11 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const generatedSessionId = opts.resumeToken ? null : this.sessionIdFactory();
     const launchArgs = permissionArgs(opts.resumeToken ?? generatedSessionId!);
     const permissionMode = permissionArg(launchArgs);
-    const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...additionArgs,
+    const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...launchArgs, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []), ...(advisor ? ["--advisor", advisor] : []), ...mcpArgs, ...additionArgs,
       ...(opts.resumeToken ? ["--resume", opts.resumeToken] : ["--session-id", generatedSessionId!]), "--name", opts.name],
       opts.resumeToken ? claudeResumeLaunchEnv(opts.resumeToken) : undefined) : opts.resumeToken
-      ? `${claudeResumeLaunchPrefix(opts.resumeToken)}${rendererPrefix}claude ${permissionMode}${modelArg}${effortArg}${advisorArg}${additionArg} --resume ${shellQuote(opts.resumeToken)} --name ${opts.name}`
-      : `${rendererPrefix}claude ${permissionMode}${modelArg}${effortArg}${advisorArg}${additionArg} --session-id ${generatedSessionId} --name ${opts.name}`;
+      ? `${claudeResumeLaunchPrefix(opts.resumeToken)}${rendererPrefix}${claudeCommand} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --resume ${shellQuote(opts.resumeToken)} --name ${opts.name}`
+      : `${rendererPrefix}${claudeCommand} ${permissionMode}${modelArg}${effortArg}${advisorArg}${mcpArg}${additionArg} --session-id ${generatedSessionId} --name ${opts.name}`;
 
     if (opts.beforeNativeDispatch && !opts.beforeNativeDispatch()) return { ok: false, error: "Selected history changed during Claude launch preparation; no native command was sent.", recovery: "attention_required" };
     const textResult = managed ? await this.tmux.sendShellCommand(binding.tmuxSession, cmd, beforeManagedInput)
@@ -436,6 +482,11 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         code: "awaiting_runtime",
       };
     }
+    // A proven idle shell showing not-found for the launched Claude says why. It stays a wait: the line may be an earlier
+    // launch's, still on screen while this launch's command is dispatched but not yet run.
+    const notFound = probe.code === "returned_to_shell"
+      ? claudeNotFoundLine(paneContent, this.autoLaunches.get(binding.nodeId)?.executable ?? binding.claudeExecutable) : null;
+    if (notFound) return { ready: false, reason: claudeNotFoundReason(notFound), code: "returned_to_shell" };
 
     if (probe.status === "resumed") return "provedWithoutLaunch" in probe ? { ready: true, provedWithoutLaunch: true } : { ready: true };
     return { ready: false, reason: probe.detail, code: probe.code };
@@ -447,7 +498,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   }
 
   /** Best-effort public seam for user-scope Claude bootstrap used by managed sessions. */
-  ensureManagedBootstrap(binding: { nodeId?: string; cwd?: string | null; tmuxSession?: string | null; permissionMode?: NodeBinding["permissionMode"] }): void {
+  ensureManagedBootstrap(binding: { nodeId?: string; cwd?: string | null; tmuxSession?: string | null; permissionMode?: NodeBinding["permissionMode"]; accountHome?: string | null }): void {
     this.provisionManagedBootstrap(binding);
   }
 
@@ -749,10 +800,11 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     }
 
     if (await this.paneReturnedToShell(binding, finalCommand)) {
+      const notFound = claudeNotFoundLine(finalContent, this.autoLaunches.get(binding.nodeId)?.executable ?? binding.claudeExecutable);
       return {
         ok: false,
         probe: probeEvidence,
-        error: "Claude resume failed: pane returned to shell instead of entering Claude",
+        error: `Claude resume failed: ${notFound ? claudeNotFoundReason(notFound) : "pane returned to shell instead of entering Claude"}`,
         recovery: "retry_fresh",
       };
     }
@@ -976,10 +1028,12 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     return resolveConcreteHint(path, content, orientation);
   }
 
-  private provisionManagedBootstrap(binding: { nodeId?: string; cwd?: string | null; tmuxSession?: string | null; permissionMode?: NodeBinding["permissionMode"] }): void {
+  private provisionManagedBootstrap(binding: { nodeId?: string; cwd?: string | null; tmuxSession?: string | null; permissionMode?: NodeBinding["permissionMode"]; accountHome?: string | null }): void {
     // OPR.0.4.8.2 agnostic rip-out: provisionRigPermissions (C2) removed — OpenRig no longer
     // authors any config-file permission policy. Trust/onboarding (C3/C4) are neutral plumbing, kept.
     const home = this.fs.homedir ?? (typeof process !== "undefined" ? process.env.HOME : undefined);
+    const accountHome = binding.accountHome !== undefined ? binding.accountHome
+      : binding.nodeId ? this.claudeManagedLaunch?.accountHome(binding.nodeId) : undefined;
     // Match launchHarness: an explicit permission mode exports the selected home to the child, so
     // only that home is provisioned.
     const managed = binding.permissionMode !== undefined ? this.claudeManagedLaunch : undefined;
@@ -989,17 +1043,17 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const failures: string[] = [];
     if (managed) {
       // The seat's own home when it declares one (member or rig `env:`), else the daemon's.
-      if (cwd) statePaths.push(managed.configPaths(cwd, binding.nodeId).statePath);
+      if (cwd) statePaths.push(managed.configPaths(cwd, binding.nodeId, accountHome).statePath);
     } else {
-      if (home) statePaths.push(nodePath.join(home, ".claude.json"));
-      // A classic seat types `claude` into its pane's shell, which inherits the tmux server's
+      if (!accountHome && home) statePaths.push(nodePath.join(home, ".claude.json"));
+      // Without an isolated account home, a classic seat inherits the tmux server's
       // environment, not the daemon's, so the bootstrap cannot see which home that child reads.
       // When the seat's own `env:` or the daemon selects CLAUDE_CONFIG_DIR, provision that home too. This deliberately
       // replaces #565's rule that classic bootstrap writes exactly one file and leaves the
       // selected home untouched: a child that inherits the daemon's selection read neither.
       try {
         const selectedCwd = cwd ?? (binding.nodeId ? this.claudeManagedLaunch?.boundCwd(binding.nodeId) : undefined);
-        const selected = selectedCwd ? this.claudeManagedLaunch?.selectedStatePath(selectedCwd, binding.nodeId) : undefined;
+        const selected = selectedCwd ? this.claudeManagedLaunch?.selectedStatePath(selectedCwd, binding.nodeId, accountHome) : undefined;
         if (selected && !statePaths.includes(selected)) statePaths.push(selected);
       } catch (err) {
         failures.push((err as Error).message);

@@ -86,6 +86,14 @@ export class RigSpecExporter {
     return { startup };
   }
 
+  /** Name dormant Claude MCP choices omitted from declarations for another runtime. */
+  claudeMcpNotCarried(rigId: string): string[] {
+    const rig = this.rigRepo.getRig(rigId);
+    return (rig?.nodes ?? [])
+      .filter((node) => node.runtime !== "claude-code" && node.claudeMcp === "none")
+      .map((node) => node.logicalId).sort();
+  }
+
   exportRig(rigId: string): LegacyRigSpec | RigSpec {
     const rig = this.rigRepo.getRig(rigId);
     if (!rig) {
@@ -135,8 +143,10 @@ export class RigSpecExporter {
       if (node.model) specNode.model = node.model;
       if (node.effort) specNode.effort = node.effort;
       if (node.advisor) specNode.advisor = node.advisor;
+      if (node.runtime === "claude-code" && node.claudeMcp) specNode.claudeMcp = node.claudeMcp;
       const rules = node.runtime === "claude-code" ? readClaudePermissionRules(this.db, node.id) : undefined;
       if (rules !== undefined) specNode.claudePermissions = rules;
+      if (node.runtime === "claude-code" && node.claudeTokenRef && !node.accountHome && node.claudeTokenRef.kind !== "api-key") specNode.claudeTokenRef = node.claudeTokenRef;
       const envelope = node.runtime === "codex" ? readCodexMemberPermissions(this.db, node.id) : undefined;
       if (envelope !== undefined) specNode.codexPermissions = envelope;
       if (node.cwd) specNode.cwd = node.cwd;
@@ -221,6 +231,7 @@ export class RigSpecExporter {
         if (node.model) member.model = node.model;
         if (node.effort) member.effort = node.effort;
         if (node.advisor) member.advisor = node.advisor;
+        if (node.runtime === "claude-code" && node.claudeMcp) member.claudeMcp = node.claudeMcp;
         // OPR.0.4.6.FAC1: a declared seat role exports with the pod
         // member (round-trip fidelity — export→import keeps the role).
         if (node.role) member.role = node.role;
@@ -229,6 +240,7 @@ export class RigSpecExporter {
         if (node.permissionPolicy) member.permissionPolicy = node.permissionPolicy;
         const rules = node.runtime === "claude-code" ? readClaudePermissionRules(this.rigRepo.db, node.id) : undefined;
         if (rules !== undefined) member.claudePermissions = rules;
+        if (node.runtime === "claude-code" && node.claudeTokenRef && !node.accountHome && node.claudeTokenRef.kind !== "api-key") member.claudeTokenRef = node.claudeTokenRef;
         const envelope = node.runtime === "codex" ? readCodexMemberPermissions(this.rigRepo.db, node.id) : undefined;
         if (envelope !== undefined) member.codexPermissions = envelope;
         if (node.env) member.env = node.env;
@@ -259,8 +271,9 @@ export class RigSpecExporter {
       };
       if (pod.summary) podSpec.summary = pod.summary;
       const podFiles = startupLayers?.podStartupFiles?.[pod.namespace];
-      if (Array.isArray(podFiles) && podFiles.length > 0) {
-        podSpec.startup = { files: podFiles, actions: [] };
+      const podActions = startupLayers?.podStartupActions?.[pod.namespace];
+      if ((Array.isArray(podFiles) && podFiles.length > 0) || (Array.isArray(podActions) && podActions.length > 0)) {
+        podSpec.startup = { files: Array.isArray(podFiles) ? podFiles : [], actions: Array.isArray(podActions) ? podActions : [] };
       }
       if (pod.continuityPolicyJson) {
         try {

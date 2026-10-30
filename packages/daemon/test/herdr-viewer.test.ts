@@ -33,7 +33,10 @@ function fixture() {
       if (uncertainCreate) { uncertainCreate = false; throw new Error("lost response"); }
       return JSON.stringify({ result: { root_pane: idless ? {} : ids } });
     }
-    if (command === "workspace list") return JSON.stringify({ result: unreadable ? {} : { workspaces: workspaceInventory ?? (enumerable ? [{ workspace_id: ids.workspace_id, label }] : []) } });
+    if (command === "workspace list") {
+      if (args.length !== 2) throw new Error("usage: herdr workspace list");
+      return JSON.stringify({ result: unreadable ? {} : { workspaces: workspaceInventory ?? (enumerable ? [{ workspace_id: ids.workspace_id, label }] : []) } });
+    }
     if (command === "pane list") return JSON.stringify({ result: paneInventory ? paneInventory[args[args.indexOf("--workspace") + 1]!] : { panes: [ids] } });
     if (command === "pane get") { if (gone) throw new Error("pane not found"); return JSON.stringify({ result: { pane: ids } }); }
     if (command === "pane run") {
@@ -187,8 +190,8 @@ describe("owned Herdr viewer", () => {
         expect(await stillCurrent!()).toBe(true); return { ok: true as const, viewer: { workspaceId: "w", paneId: "p", terminalId: "t", readOnly: false }, created: true };
       } };
     const svc = new TerminalService({ viewsStore: { get: () => null, list: () => [] }, listRigSeats: () => null, listPodSeats: () => null,
-      listScopeSeats: () => null, listRigNames: () => [], resolveHost: () => null, hasSession: () => true, resolveLocalTmux: () => "/usr/bin/tmux", resolveProvider: () => provider,
-      resolveTaskView: () => ({ task: { qitemId: "qitem-root", name: "Task root", complete: true, issues: [], members: joined ? [{ key, seat: "a@team", availability: "available", viewerStatus: "not-provisioned", obligations: [{ qitemId: "qitem-root", state: "pending" }] }] : [] },
+      listRigNames: () => [], resolveHost: () => null, hasSession: () => true, resolveLocalTmux: () => "/usr/bin/tmux", resolveProvider: () => provider,
+      resolveTaskView: () => ({ task: { kind: "qitem", id: "qitem-root", qitemId: "qitem-root", name: "Task root", complete: true, issues: [], members: joined ? [{ key, seat: "a@team", availability: "available", viewerStatus: "not-provisioned", obligations: [{ qitemId: "qitem-root", state: "pending" }] }] : [] },
         members: joined ? [{ seat: "a@team", label: "a", tmuxSession: "a@team", host: null, alive: true, readOnly: true }] : [] }) });
     const preview = await svc.previewView({ view: "qitem:qitem-root", provider: "herdr" });
     expect("planId" in preview).toBe(true); if (!("planId" in preview)) throw new Error("missing preview");

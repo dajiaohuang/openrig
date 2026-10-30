@@ -29,6 +29,7 @@ function makeDeps(opts?: { routes?: Record<string, StubResponse> }): {
     deps: {
       lifecycleDeps: {} as TerminalDeps["lifecycleDeps"],
       clientFactory: () => ({
+        isLocalInstance: vi.fn(async () => true),
         get: vi.fn(async (path: string) => {
           calls.push({ method: "GET", path });
           return routes[`GET ${path}`] ?? { status: 200, data: {} };
@@ -46,6 +47,26 @@ function makeDeps(opts?: { routes?: Record<string, StubResponse> }): {
   };
 }
 
+describe("task-following controls", () => {
+  beforeEach(() => { process.exitCode = 0; vi.spyOn(console, "log").mockImplementation(() => {}); });
+  const body = { provider: "herdr", ok: true, opened: [], absent: [], degraded: [], pages: 1,
+    following: { id: "stable", enabled: true, state: "empty", maxTiles: 4, tiles: [], events: [], overflow: [] } };
+  it("posts one owner operation with explicit follow controls and accepts a complete empty view", async () => {
+    const { deps, calls } = makeDeps({ routes: { "POST /api/terminal/follow": { status: 200, data: body } } });
+    const program = createProgram({ terminalDeps: deps }); program.exitOverride();
+    await program.parseAsync(["node", "rig", "terminal", "open", "qitem:task", "--provider", "herdr", "--follow", "--max-tiles", "4", "--pin", "a@team", "--json"]);
+    expect(calls).toEqual([{ method: "POST", path: "/api/terminal/follow", body: { view: "qitem:task", provider: "herdr", enabled: true,
+      maxTiles: 4, pin: ["a@team"], unpin: undefined, suppress: undefined, unsuppress: undefined, suppressionMs: undefined, graceMs: undefined, focusRetentionMs: undefined } }]);
+    expect(process.exitCode).toBe(0);
+  });
+  it("disables without opening a desktop or creating a replacement workspace", async () => {
+    const { deps, calls } = makeDeps({ routes: { "POST /api/terminal/follow": { status: 200, data: { ...body, following: { ...body.following, enabled: false, state: "disabled" } } } } });
+    const program = createProgram({ terminalDeps: deps }); program.exitOverride();
+    await program.parseAsync(["node", "rig", "terminal", "open", "qitem:task", "--no-follow", "--json"]);
+    expect(calls).toHaveLength(1); expect(calls[0]).toMatchObject({ path: "/api/terminal/follow", body: { enabled: false } });
+  });
+});
+
 const opened = (seats: string[], extra: Record<string, unknown> = {}) => ({
   provider: "herdr", ok: seats.length > 0, opened: seats, absent: [], degraded: [], pages: 1, ...extra,
 });
@@ -59,12 +80,51 @@ describe("rig terminal CLI", () => {
     process.exitCode = undefined;
   });
 
-  it("registers open/views/status subcommands", () => {
+  it("registers open/views/status/attach subcommands", () => {
     const { deps } = makeDeps();
     const program = createProgram({ terminalDeps: deps });
     const cmd = program.commands.find((c) => c.name() === "terminal");
     expect(cmd).toBeDefined();
-    expect(cmd!.commands.map((c) => c.name()).sort()).toEqual(["open", "status", "views"]);
+    expect(cmd!.commands.map((c) => c.name()).sort()).toEqual(["attach", "open", "status", "views"]);
+  });
+
+  it.each([false, true])("attaches using the daemon's effective server, preserving read-only=%s", async readOnly => {
+    const serverArgs = ["-S", "/private/selected server.sock"];
+    const { deps, calls } = makeDeps({ routes: { "GET /api/terminal/status": {
+      status: 200, data: { tmux: { mode: "inherit", requestedMode: "isolated", migrationPending: true, serverArgs } },
+    } } });
+    deps.attachTmux = vi.fn(async () => 7);
+    await createProgram({ terminalDeps: deps }).parseAsync([
+      "node", "rig", "terminal", "attach", ...(readOnly ? ["--read-only"] : []), "--", "seat'quoted",
+    ]);
+    expect(deps.attachTmux).toHaveBeenCalledWith({ session: "seat'quoted", serverArgs, readOnly });
+    expect(calls).toEqual([{ method: "GET", path: "/api/terminal/status" }]);
+    expect(process.exitCode).toBe(7);
+  });
+
+  it.each([
+    { status: 503, data: {}, message: "HTTP 503" },
+    { status: 200, data: {}, message: "cannot report its tmux server" },
+    { status: 200, data: { tmux: { serverArgs: ["kill-server"] } }, message: "invalid tmux server options" },
+  ])("reports unreadable or invalid server metadata without attaching: $message", async response => {
+    const { deps } = makeDeps({ routes: { "GET /api/terminal/status": response } });
+    deps.attachTmux = vi.fn(async () => 0);
+    await createProgram({ terminalDeps: deps }).parseAsync(["node", "rig", "terminal", "attach", "seat"]);
+    expect(deps.attachTmux).not.toHaveBeenCalled();
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining(response.message));
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("does not attach a local namesake for an HTTP remote daemon", async () => {
+    const { deps, calls } = makeDeps();
+    const factory = deps.clientFactory;
+    deps.clientFactory = url => Object.assign(factory(url), { baseUrl: "http://remote:7433", isLocalInstance: vi.fn(async () => false) });
+    deps.attachTmux = vi.fn(async () => 0);
+    await createProgram({ terminalDeps: deps }).parseAsync(["node", "rig", "terminal", "attach", "seat"]);
+    expect(calls).toEqual([]);
+    expect(deps.attachTmux).not.toHaveBeenCalled();
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining("local tmux"));
+    expect(process.exitCode).toBe(1);
   });
 
   it("--window uses local desktop handling and reports a headless refusal without a provider POST", async () => {

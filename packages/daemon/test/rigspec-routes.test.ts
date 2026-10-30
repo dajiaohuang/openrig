@@ -144,6 +144,38 @@ describe("Rigspec export routes", () => {
     }
   });
 
+  it.each(["legacy", "pod-aware"])("names dormant Claude MCP choices in the %s YAML export without changing JSON", async (format) => {
+    const rig = rigRepo.createRig("mcp-export");
+    const pod = format === "pod-aware" ? new PodRepository(db).createPod(rig.id, "dev", "Dev") : undefined;
+    const member = { runtime: "claude-code", podId: pod?.id, agentRef: "local:agents/worker", profile: "default", cwd: "/workspace" };
+    const switched = rigRepo.addNode(rig.id, "dev.switched", { ...member, claudeMcp: "none" });
+    rigRepo.addNode(rig.id, "dev.claude", { ...member, claudeMcp: "none" });
+    rigRepo.addNode(rig.id, "dev.plain", { ...member, runtime: "codex" });
+    // Runtime switches retain the saved Claude choice, while the exported declaration describes Codex.
+    db.prepare("UPDATE nodes SET runtime = 'codex' WHERE id = ?").run(switched.id);
+
+    const response = await app.request(`/api/rigs/${rig.id}/spec`);
+    expect(response.status).toBe(200);
+    const yaml = await response.text();
+    expect(yaml.split("\n").filter((line) => line.startsWith("# Not carried:"))).toEqual([
+      "# Not carried: dev.switched's claude_mcp: none; add it again if this exported copy is switched back to Claude.",
+    ]);
+    const parsed = PodRigSpecCodec.parse(yaml);
+    if (format === "pod-aware") expect(PodRigSpecSchema.validate(parsed).valid).toBe(true);
+
+    const jsonResponse = await app.request(`/api/rigs/${rig.id}/spec.json`);
+    expect(jsonResponse.status).toBe(200);
+    const json = await jsonResponse.json();
+    const members: Array<{ id: string; runtime: string; claudeMcp?: string }> = format === "pod-aware" ? json.pods[0].members : json.nodes;
+    const id = (name: string) => format === "pod-aware" ? name : `dev.${name}`;
+    expect(members.find((entry) => entry.id === id("switched"))).toMatchObject({ runtime: "codex" });
+    expect(members.find((entry) => entry.id === id("switched"))).not.toHaveProperty("claudeMcp");
+    expect(members.find((entry) => entry.id === id("claude"))).toMatchObject({ runtime: "claude-code", claudeMcp: "none" });
+    expect(members.find((entry) => entry.id === id("plain"))).not.toHaveProperty("claudeMcp");
+    expect(json).not.toHaveProperty("notCarried");
+    expect(rigRepo.getRig(rig.id)?.nodes.find((node) => node.id === switched.id)?.claudeMcp).toBe("none");
+  });
+
   it("GET /api/rigs/:rigId/spec encodes non-ASCII X-Rig-Root header safely", async () => {
     const rig = rigRepo.createRig("non-ascii-rig");
     const pod = new PodRepository(db).createPod(rig.id, "dev", "Dev");
@@ -763,6 +795,119 @@ describe("Rigspec import routes (pod-aware dual-stack)", () => {
     expect(roundTrip.pods[0]!.members[0]!.startup).toEqual(startup);
     expect(sessionRegistry.getSessionsForRig(rigId)).toEqual([]);
     expect(sessionRegistry.getSessionsForRig(second.rigId)).toEqual([]);
+  });
+
+  it("#1631 materializes and exports action-only pod startup without launching", async () => {
+    const root = nodePath.resolve(os.tmpdir(), "pod-action-root");
+    const yaml = POD_AWARE_YAML.replace('agent_ref: "local:agents/impl"', 'agent_ref: "builtin:terminal"')
+      .replace("runtime: claude-code", "runtime: terminal").replace("profile: default", "profile: none")
+      .replace("    label: Dev", `    label: Dev
+    startup:
+      actions:
+        - type: send_text
+          value: orient pod
+          phase: after_ready
+          idempotent: true
+          applies_on: [fresh_start]`);
+    const created = await app.request("/api/rigs/import/materialize", { method: "POST",
+      headers: { "Content-Type": "text/yaml", "X-Rig-Root": root }, body: yaml });
+    expect(created.status).toBe(201);
+    const { rigId } = await created.json();
+    const exported = await (await app.request(`/api/rigs/${rigId}/spec`)).text();
+    const parsed = PodRigSpecSchema.normalize(PodRigSpecCodec.parse(exported) as Record<string, unknown>);
+    expect(parsed.pods[0]!.startup?.actions).toMatchObject([{ type: "send_text", value: "orient pod", phase: "after_ready", idempotent: true, appliesOn: ["fresh_start"] }]);
+    const restored = await app.request("/api/rigs/import/materialize", { method: "POST",
+      headers: { "Content-Type": "text/yaml", "X-Rig-Root": root }, body: exported.replace("name: pod-rig", "name: restored-pod") });
+    expect(restored.status).toBe(201);
+    const second = await restored.json();
+    const again = await (await app.request(`/api/rigs/${second.rigId}/spec`)).text();
+    const roundTrip = PodRigSpecSchema.normalize(PodRigSpecCodec.parse(again) as Record<string, unknown>);
+    expect(roundTrip.pods[0]!.startup).toEqual(parsed.pods[0]!.startup);
+    expect(sessionRegistry.getSessionsForRig(rigId)).toEqual([]);
+    expect(sessionRegistry.getSessionsForRig(second.rigId)).toEqual([]);
+  });
+
+  it("#1631 exports pod actions and member startup together", async () => {
+    const root = nodePath.resolve(os.tmpdir(), "pod-member-root");
+    const yaml = POD_AWARE_YAML.replace('agent_ref: "local:agents/impl"', 'agent_ref: "builtin:terminal"')
+      .replace("runtime: claude-code", "runtime: terminal").replace("profile: default", "profile: none")
+      .replace("    label: Dev", `    label: Dev
+    startup:
+      actions:
+        - type: send_text
+          value: pod orientation
+          phase: after_ready
+          idempotent: true
+          applies_on: [fresh_start]`)
+      .replace("        cwd: /tmp", `        cwd: /tmp
+        startup:
+          files:
+            - path: member.md
+              required: false`);
+    const created = await app.request("/api/rigs/import/materialize", { method: "POST",
+      headers: { "Content-Type": "text/yaml", "X-Rig-Root": root }, body: yaml });
+    expect(created.status).toBe(201);
+    const { rigId } = await created.json();
+    const response = await app.request(`/api/rigs/${rigId}/spec`);
+    const parsed = PodRigSpecSchema.normalize(PodRigSpecCodec.parse(await response.text()) as Record<string, unknown>);
+    expect(parsed.pods[0]!.startup?.actions[0]?.value).toBe("pod orientation");
+    expect(parsed.pods[0]!.members[0]!.startup?.files[0]?.path).toBe("member.md");
+    expect(sessionRegistry.getSessionsForRig(rigId)).toEqual([]);
+  });
+
+  it("#1631 preserves mixed pod files and actions with their original root", async () => {
+    const root = nodePath.resolve(os.tmpdir(), "mixed-pod-root");
+    const yaml = POD_AWARE_YAML.replace('agent_ref: "local:agents/impl"', 'agent_ref: "builtin:terminal"')
+      .replace("runtime: claude-code", "runtime: terminal").replace("profile: default", "profile: none")
+      .replace("    label: Dev", `    label: Dev
+    startup:
+      files:
+        - path: docs/pod.md
+          required: false
+      actions:
+        - type: send_text
+          value: orient pod
+          phase: after_ready
+          idempotent: true
+          applies_on: [fresh_start]`);
+    const created = await app.request("/api/rigs/import/materialize", { method: "POST",
+      headers: { "Content-Type": "text/yaml", "X-Rig-Root": root }, body: yaml });
+    expect(created.status).toBe(201);
+    const { rigId } = await created.json();
+    const response = await app.request(`/api/rigs/${rigId}/spec`);
+    expect(decodeURIComponent(response.headers.get("X-Rig-Root")!)).toBe(root);
+    const parsed = PodRigSpecSchema.normalize(PodRigSpecCodec.parse(await response.text()) as Record<string, unknown>);
+    expect(parsed.pods[0]!.startup?.files[0]?.path).toBe("docs/pod.md");
+    expect(nodePath.resolve(root, parsed.pods[0]!.startup!.files[0]!.path)).toBe(nodePath.join(root, "docs", "pod.md"));
+    expect(parsed.pods[0]!.startup?.actions[0]?.value).toBe("orient pod");
+    expect(rigRepo.getRigStartupLayers(rigId)?.podStartupFiles?.dev?.[0]?.path).toBe("docs/pod.md");
+  });
+
+  it("#1631 exports files and actions for the valid __proto__ pod id", async () => {
+    const root = nodePath.resolve(os.tmpdir(), "proto-pod-root");
+    const yaml = POD_AWARE_YAML.replace('agent_ref: "local:agents/impl"', 'agent_ref: "builtin:terminal"')
+      .replace("runtime: claude-code", "runtime: terminal").replace("profile: default", "profile: none")
+      .replace("  - id: dev", "  - id: __proto__")
+      .replace("    label: Dev", `    label: Dev
+    startup:
+      files:
+        - path: docs/pod.md
+          required: false
+      actions:
+        - type: send_text
+          value: orient pod
+          phase: after_ready
+          idempotent: true
+          applies_on: [fresh_start]`);
+    const created = await app.request("/api/rigs/import/materialize", { method: "POST",
+      headers: { "Content-Type": "text/yaml", "X-Rig-Root": root }, body: yaml });
+    expect(created.status, JSON.stringify(await created.clone().json())).toBe(201);
+    const { rigId } = await created.json();
+    const response = await app.request(`/api/rigs/${rigId}/spec`);
+    const parsed = PodRigSpecSchema.normalize(PodRigSpecCodec.parse(await response.text()) as Record<string, unknown>);
+    expect(parsed.pods[0]!.id).toBe("__proto__");
+    expect(parsed.pods[0]!.startup?.files[0]?.path).toBe("docs/pod.md");
+    expect(parsed.pods[0]!.startup?.actions[0]?.value).toBe("orient pod");
   });
 
   it("POST /api/rigs/import/materialize creates rig structure without launching", async () => {

@@ -80,7 +80,7 @@ async function describeLineageFailure(input: {
     const rows = pid ? await Promise.resolve((input.listProcesses ?? listNativeProcesses)()).catch((): NativeProcessRow[] => []) : [];
     if (!pid || !rows.some((row) => row.pid === pid)) return "The pane's process could not be found in the process listing (the listing may have failed), so the runtime could not be verified";
     const observation = { target: input.target, tmux: input.tmux, listProcesses: () => rows };
-    const passes = input.variant === "codex" ? !!await observeCodexPaneProcess({ ...observation, expectedToken: input.expectedToken, requireResume: input.exact })
+    const passes = input.variant === "codex" ? !!await observeCodexPaneProcess({ ...observation, expectedToken: input.expectedToken, requireResume: input.exact, requireArgv: true })
       : input.variant === "claude_conversation" ? !!await observeClaudePaneProcess({ ...observation, expectedToken: input.expectedToken, rotation: input.rotation })
       : input.variant === "claude_runtime" ? !!await observeClaudePaneRuntime(observation)
       : !!(input.expectedToken && findExactNativeResumeProcess(rows, pid, "claude-code", input.expectedToken, input.rotation));
@@ -208,7 +208,7 @@ export async function rebindAndVerifyPaneIdentity(input: {
     runtimeMatch = "match";
     const native = await verifyCodexPaneProcess({ target: pane.id, tmux: input.tmux,
       listProcesses: input.listProcesses, expectedToken: expectedResumeToken,
-      requireResume: input.requireExactResumeLineage === true });
+      requireResume: input.requireExactResumeLineage === true, requireArgv: true });
     const currentPanes = await input.tmux.listPanes(input.sessionName).catch(() => []);
     if (native?.panePid === pid && currentPanes.length === 1 && currentPanes[0]?.id === pane.id) lineageMatch = native.process;
   } else if (claudeProcessProof) {

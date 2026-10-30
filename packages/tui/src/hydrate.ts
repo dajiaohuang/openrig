@@ -504,13 +504,18 @@ export async function hydrateSnapshot(
   const wantsConnections = viewContext?.section === "connections";
   const wantsSpecs = !viewContext || viewContext.section === "specs" || topologyLeaf?.kind === "agent";
   const wantsTopologyScope = !viewContext || viewContext.section === "topology";
-  const wantsRecent = wantsTopologyScope && (!topologyLeaf || topologyLeaf.kind === "host" || topologyLeaf.kind === "rig");
+  // A pod's Recent tab shows its rig's window; the pod's other tabs draw none of it.
+  const wantsRecent = wantsTopologyScope && (!topologyLeaf || topologyLeaf.kind === "host" || topologyLeaf.kind === "rig"
+    || (topologyLeaf.kind === "pod" && viewContext?.viewTab === "recent"));
   const focusedTopology = !!viewContext && wantsTopologyScope && viewContext.viewTab !== "pulse";
   const broadReads = !readingOnly && !focusedTopology && !wantsConnections;
   // Seat rows (Q / WORK / NOW) join these four lists: only a seat's page and the drilled table tab show them.
   const seatQueueReads = broadReads || (focusedTopology && (topologyLeaf?.kind === "agent" || (!!topologyLeaf && viewContext?.viewTab === "table")));
+  // A seat's page also lists that seat's RECENTLY FINISHED items; the drilled table tab shows none.
+  const recentlyFinishedReads = broadReads || (focusedTopology && topologyLeaf?.kind === "agent");
   // render.ts draws healthSummaryLine on the instance Table and on the rig/pod Table and Overview; those focused pages must load health too.
-  const rendersHealthSummary = (topologyLeaf?.kind === "host" && viewContext?.viewTab === "table")
+  const rendersHealthSummary = topologyLeaf?.kind === "agent"
+    || (topologyLeaf?.kind === "host" && viewContext?.viewTab === "table")
     || ((topologyLeaf?.kind === "rig" || topologyLeaf?.kind === "pod") && (viewContext?.viewTab === "table" || viewContext?.viewTab === "overview"));
   const healthRequested = broadReads || viewContext?.viewTab === "health" || rendersHealthSummary;
   const wantsGraph = wantsTopologyScope && (!viewContext || viewContext.viewTab === "graph");
@@ -537,7 +542,7 @@ export async function hydrateSnapshot(
     !seatQueueReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-in-progress", () => client.queueInProgress()),
     // PULSE UP NEXT + JUST FINISHED lane reads (increment 3) — same shipped /list route
     !seatQueueReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-pending", () => client.queuePending()),
-    !broadReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-recently-finished", () => client.queueRecentlyFinished()),
+    !recentlyFinishedReads ? Promise.resolve(null) : safe<QueueItemRead[]>("queue-recently-finished", () => client.queueRecentlyFinished()),
     !broadReads ? Promise.resolve(null) : safe<{ missions: unknown[]; sourceObservation?: { state: string } }>("scopes", () => client.scopesDetailed() as Promise<{ missions: unknown[] }>),
     !broadReads ? Promise.resolve(null) : safe<{ rows: unknown[] }>("execution", () => client.execution(executionMission ?? undefined) as Promise<{ rows: unknown[] }>),
     broadReads && sliceDetailName

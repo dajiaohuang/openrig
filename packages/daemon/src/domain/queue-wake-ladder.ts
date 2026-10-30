@@ -1,6 +1,11 @@
 import { resolveEscalationOwner, ESCALATION_HOP_TAG, hasConsumedEscalationHop } from "./escalation-owner.js";
+import { tmuxAttachCommand } from "../adapters/tmux-server.js";
+import { shellQuote } from "../adapters/shell-quote.js";
+import type { HookReviewObservation } from "./kernel-hook-review.js";
 import type { ArbitratedSeatState } from "./activity-taxonomy.js";
 import { seatRuntimeHomeBySession } from "./seat-runtime-home.js";
+import { OPENRIG_SENDER } from "../lib/pane-envelope.js";
+import { renderQueueHandoffNudge } from "./queue-nudge-text.js";
 import { quietHoldCustody } from "./quiet-hold-custody.js";
 import { latestHookMovedOn, latestHookPermissionPending, latestHookWaitsOnPerson } from "./agent-activity-store.js";
 import type { AgentActivity } from "./types.js";
@@ -201,6 +206,8 @@ export interface WakeLadderDeps {
   usageLimitJitterSeconds?: number;
   /** Cached arbitrated activity only: no new probe or native input. */
   readPromptState?: (destination: string, refusedAt: string) => "blocked" | "clear" | "unknown";
+  /** Fresh bound kernel Codex screens only; no native input or new scheduler. */
+  readHookReviews?: () => Promise<HookReviewObservation[]>;
   now?: Date;
   log?: (line: string) => void;
   /** OPR.0.5.6.1 — the operator rung's delivery leg. dispatchEscalation delivers
@@ -640,7 +647,10 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
       deps.attemptWake ??
       (async (qitemId: string, target: string): Promise<string> => {
         // A ladder retry is OpenRig's own scheduling on the row, whoever created it.
-        await deps.queueRepo.maybeNudge(qitemId, target, true, undefined, undefined, "openrig");
+        // It is sent as OpenRig (daemon@kernel); the row's original source stays visible in the body.
+        const row = deps.queueRepo.getById(qitemId);
+        const bodyOverride = `${renderQueueHandoffNudge(qitemId, null)}${row?.sourceSession ? ` Row source: ${row.sourceSession}.` : ""}`;
+        await deps.queueRepo.maybeNudge(qitemId, target, true, OPENRIG_SENDER, bodyOverride, "openrig");
         return deps.queueRepo.getById(qitemId)?.lastNudgeWireResult ?? "indeterminate:no transport available";
       });
 
@@ -842,7 +852,7 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
         if (!due || suspended) continue;
         const consumedReason = `${reason}; escalates_to one-hop delivery already used; existing fallback retained`;
         // Keep this recovery visible without sharing the ordinary destination aggregate or forwarding another hop.
-        await ensureEscalationRow(deps, row.destinationSession, resolveOperatorSeat() ?? row.sourceSession,
+        await ensureEscalationRow(deps, row.destinationSession, humanAlertCarrier(deps, row.destinationSession, row.sourceSession),
           [{ row, reason: consumedReason }], consumedReason, `consumed-hop:${row.qitemId}`, [ESCALATION_HOP_TAG]);
         if (!view.orchRung) appendMarker(deps.queueRepo, row, `${LADDER_RUNG_PREFIX} orchestrator self-skip reason=${consumedReason}`);
         if (await operatorRung(deps, row, consumedReason, actions, view)) {
@@ -878,10 +888,10 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
           // F4: rung 1 self-skips when it resolves to the destination itself (or nowhere)
           // — never escalate INTO the dead seat; fall through to the operator rung now.
           // The operator floor must be a VISIBLE OBJECT, not markers alone: ensure the
-          // per-destination escalation row exists (addressed to the operator seat, else
-          // the obligation's own creator) so the escalations view and the health count
+          // per-destination escalation row has an admissible carrier so the
+          // escalations view and the health count
           // expose it — it stays open past the batons' exhaustion.
-          const floorDest = resolveOperatorSeat() ?? needsOrchRung[0]!.row.sourceSession;
+          const floorDest = humanAlertCarrier(deps, dest, needsOrchRung[0]!.row.sourceSession);
           await ensureEscalationRow(deps, dest, floorDest, needsOrchRung, reason);
           for (const m of needsOrchRung) {
             appendMarker(
@@ -1073,6 +1083,13 @@ function waitsOnPostedPromptAlert(deps: WakeLadderDeps, row: QueueItem, choiceOn
   return true;
 }
 
+// The operator engine owns actual human delivery. Its non-nudged queue carrier
+// must still be locally admissible; cross-host source provenance is not a local destination.
+function humanAlertCarrier(deps: WakeLadderDeps, dest: string, source?: string): string {
+  const candidates = [resolveOperatorSeat(), source];
+  return candidates.find((candidate): candidate is string => Boolean(candidate && deps.queueRepo.acceptsDestination(candidate))) ?? dest;
+}
+
 /** Positive refusals enter the existing rungs without ever retrying the blocked
  * seat. One aggregate carries the episode's obligations and notification key;
  * original work remains owned by its current recipient. */
@@ -1085,7 +1102,7 @@ async function advancePromptRefusals(
   attemptWake: (qitemId: string, target: string) => Promise<string>,
   actions: WakeLadderAction[],
 ): Promise<void> {
-  const groups = new Map<string, { keys: string[]; rowKeys: Map<string, Set<string>>; jobKeys: Set<string>; rows: Map<string, QueueItem>; jobs: Map<string, string>; refusedAt: string; choiceSince?: string; choice?: boolean; other?: boolean; latestChoice?: boolean }>();
+  const groups = new Map<string, { keys: string[]; rowKeys: Map<string, Set<string>>; jobKeys: Set<string>; rows: Map<string, QueueItem>; jobs: Map<string, string>; refusedAt: string; choiceSince?: string; choice?: boolean; other?: boolean; latestChoice?: boolean; hookReview?: string }>();
   const readAt = (dest: string, refusedAt: string): "blocked" | "clear" | "unknown" => {
     try { return deps.readPromptState?.(dest, refusedAt) ?? "unknown"; } catch { return "unknown"; }
   };
@@ -1181,6 +1198,29 @@ async function advancePromptRefusals(
     if (job.choice) group.choice = true; else group.other = true;
   }
 
+  const hookObservations = new Map<string, HookReviewObservation>();
+  const freshHook = (observation: HookReviewObservation): boolean =>
+    Number.isFinite(Date.parse(observation.observedAt)) && Math.abs(now.getTime() - Date.parse(observation.observedAt)) <= 15_000;
+  if (deps.readHookReviews) {
+    try {
+      for (const observation of await deps.readHookReviews()) {
+        if (!freshHook(observation)) continue;
+        hookObservations.set(observation.destination, observation);
+        const key = `${PROMPT_EPISODE_TAG}${observation.destination}|hook-review:${observation.episode}|after:${clearedAlert(observation.destination)?.qitemId ?? "start"}`;
+        if (closedEpisode(key)) continue;
+        // Unknown screens retain an existing episode but never start one.
+        const existing = deps.db.prepare(`SELECT 1 FROM queue_items WHERE state IN ('pending','in-progress','blocked')
+          AND json_valid(tags) AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)`).get(key);
+        if (observation.state !== "blocked" && !existing) continue;
+        let group = groups.get(observation.destination);
+        if (!group) { group = { keys: [], rowKeys: new Map(), jobKeys: new Set(), rows: new Map(), jobs: new Map(), refusedAt: observation.observedAt }; groups.set(observation.destination, group); }
+        group.keys.push(key);
+        group.hookReview = key;
+        group.other = true; // hook trust is a person's decision, not an automated choice rung
+      }
+    } catch { /* No new evidence; existing hook episodes remain unresolved below. */ }
+  }
+
   // A recovery returned to the blocked seat inherits only its source row's episodes.
   // Reconstruct this membership before retirement, even when the recovery has no refusal of its own.
   for (const [dest, group] of groups) {
@@ -1205,6 +1245,7 @@ async function advancePromptRefusals(
 
   const promptState = (dest: string): "blocked" | "clear" | "unknown" => {
     const group = groups.get(dest);
+    if (group?.hookReview) return hookObservations.get(dest)?.state ?? "unknown";
     const state = readAt(dest, group?.refusedAt ?? now.toISOString());
     // A choice prompt no hook announces leaves the seat's own evidence unknown, and the transport's refusal is a read of
     // that prompt. While the latest refusal is at a choice prompt, one held one retry interval with nothing newer clearing
@@ -1228,6 +1269,8 @@ async function advancePromptRefusals(
     if (unreadableDestinations.has(dest)) continue;
     const group = groups.get(dest);
     const tags = aggregate.tags;
+    if (tags.some(t => t.startsWith(`${PROMPT_EPISODE_TAG}${dest}|hook-review:`))
+      && (!hookObservations.has(dest) || hookObservations.get(dest)?.state === "unknown")) continue;
     const sameEpisode = group?.keys.some(key => tags.includes(key));
     const cleared = promptState(dest) === "clear";
     if (!sameEpisode || cleared) {
@@ -1282,7 +1325,7 @@ async function advancePromptRefusals(
         const choiceOnly = Boolean(group.choice && !group.other);
         const promptTags = choiceOnly ? [PROMPT_ALERT_TAG, PROMPT_CHOICE_TAG, `consumed-prompt-destination:${dest}`,
           ...(group.rowKeys.get(member.row.qitemId) ?? [])] : [];
-        const continuation = await ensureEscalationRow(deps, dest, resolveOperatorSeat() ?? member.row.sourceSession,
+        const continuation = await ensureEscalationRow(deps, dest, humanAlertCarrier(deps, dest, member.row.sourceSession),
           [{ row: member.row, reason }], reason, `consumed-hop:${member.row.qitemId}`, [ESCALATION_HOP_TAG, ...promptTags]);
         if (!view.orchRung) appendMarker(deps.queueRepo, member.row, `${LADDER_RUNG_PREFIX} orchestrator self-skip reason=${reason}`);
         // A choice alert's tags and dispatch marker must live on the same durable row the shared gate reads.
@@ -1309,20 +1352,22 @@ async function advancePromptRefusals(
       }
       members.splice(i, 1);
     }
-    if (!members.length && !group.jobs.size) continue;
+    if (!members.length && !group.jobs.size && !group.hookReview) continue;
     const orch = openEscalationOwner(deps.db, `prompt-destination:${dest}`) ?? resolveOrch(dest);
     const toOperator = orch === null || orch === dest;
     const route = !deps.resolveOrchestrator
       ? resolveEscalationOwner(deps.db, dest, target => deps.queueRepo.acceptsDestination(target)) : null;
-    const reason = "interactive prompt blocks outstanding work; no input was sent"
+    const reason = (group.hookReview
+      ? `Seat ${dest} is stopped at Codex's "Hooks need review" (hook_trust_gate). Reach that pane on this host with ${tmuxAttachCommand(shellQuote(dest))}. Review the hooks there through Codex's hook review; approve them there only if you choose to. OpenRig does not approve or bypass this review. No input was sent.`
+      : "interactive prompt blocks outstanding work; no input was sent")
       + (route && route.outcome !== "none" && route.outcome !== "parent" ? `; ${route.reason}` : "");
     // Every refusal at a choice prompt: the alert follows queue.wake_human_rung and holds for other choice alerts. Any other
     // prompt keeps the permission-prompt route.
     const choiceOnly = Boolean(group.choice && !group.other);
     const kindTags = choiceOnly ? [PROMPT_CHOICE_TAG] : [];
-    const keys = group.keys.filter(key => group.jobKeys.has(key) || members.some(m => group.rowKeys.get(m.row.qitemId)?.has(key)));
+    const keys = group.keys.filter(key => key === group.hookReview || group.jobKeys.has(key) || members.some(m => group.rowKeys.get(m.row.qitemId)?.has(key)));
     const aggregate = await ensureEscalationRow(deps, dest,
-      toOperator ? resolveOperatorSeat() ?? members[0]?.row.sourceSession ?? [...group.jobs.values()][0]! : orch!, members, reason,
+      toOperator ? humanAlertCarrier(deps, dest, members[0]?.row.sourceSession ?? [...group.jobs.values()][0]) : orch!, members, reason,
       `prompt-destination:${dest}`, [PROMPT_ALERT_TAG, ...kindTags, ...keys], group.jobs);
     const row = deps.queueRepo.getById(aggregate.qitemId);
     if (!row) continue;
@@ -1330,8 +1375,19 @@ async function advancePromptRefusals(
     // A reminder's run keeps its key while its latest refusal changes kind, so the kind is recomputed on its own too.
     const kindChanged = choiceOnly !== Boolean(row.tags?.includes(PROMPT_CHOICE_TAG));
     if (addedKeys.length || kindChanged) {
-      deps.db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?")
-        .run(JSON.stringify([...(row.tags ?? []).filter(t => t !== PROMPT_CHOICE_TAG), ...kindTags, ...addedKeys]), row.qitemId);
+      const events = deps.db.transaction(() => {
+        // The original body and its delivery receipt stay immutable. Publish newly
+        // observed hook guidance on this same readable record before any exhausted
+        // or accepted-delivery short-circuit, once per joined hook episode.
+        const events = group.hookReview && addedKeys.includes(group.hookReview)
+          ? deps.queueRepo.updateWithinTransaction({ qitemId: row.qitemId, actorSession: LADDER_ACTOR,
+              summary: reason, transitionNote: `hook-review observed: ${reason}` }).persistedEvents
+          : [];
+        deps.db.prepare("UPDATE queue_items SET tags = ? WHERE qitem_id = ?")
+          .run(JSON.stringify([...(row.tags ?? []).filter(t => t !== PROMPT_CHOICE_TAG), ...kindTags, ...addedKeys]), row.qitemId);
+        return events;
+      })();
+      deps.queueRepo.notifyCommitted(events);
       // An alert that already exists names a reminder that joins it; nothing is sent again for it.
       const addedJobs = [...group.jobs.keys()].filter(id => addedKeys.some(key => key.includes(`|watchdog:${id}|`)));
       if (addedJobs.length) deps.queueRepo.transitionLog.append({ qitemId: row.qitemId, state: row.state, actorSession: LADDER_ACTOR,
@@ -1352,9 +1408,14 @@ async function advancePromptRefusals(
     }
     if (view.lastMarkerTs !== null && now.getTime() - view.lastMarkerTs < intervalS * 1000) continue;
     // Re-read at the send boundary after aggregate persistence.
+    if (group.hookReview) {
+      const current = (await deps.readHookReviews?.().catch(() => []) ?? []).find(o => o.destination === dest);
+      if (!current || !freshHook(current) || current.state !== "blocked"
+        || current.episode !== hookObservations.get(dest)?.episode) continue;
+    }
     if (promptState(dest) !== "blocked") continue;
     const freshMembers = members.map(m => readCandidate(m.row.qitemId, dest));
-    if (unreadableDestinations.has(dest) || (!group.jobs.size && !freshMembers.some(fresh =>
+    if (unreadableDestinations.has(dest) || (!group.jobs.size && !group.hookReview && !freshMembers.some(fresh =>
       fresh && fresh.destinationSession === dest && ["pending", "in-progress", "blocked"].includes(fresh.state)))) continue;
     if (!view.orchRung) {
       if (!toOperator) {
@@ -1530,7 +1591,7 @@ async function ensureEscalationRow(
     ? resolveEscalationOwner(deps.db, dest, target => deps.queueRepo.acceptsDestination(target)) : null;
   const oneHop = route?.outcome === "routed" && route.owner === orch;
   const created = await deps.queueRepo.create({
-    sourceSession: members[0]?.row.sourceSession ?? [...jobs.values()][0]!,
+    sourceSession: members[0]?.row.sourceSession ?? [...jobs.values()][0] ?? OPENRIG_SENDER,
     destinationSession: orch,
     body,
     summary: `Wake escalation: ${members.length} baton(s)${jobs.size ? ` and ${jobs.size} watchdog reminder(s)` : ""} stuck at ${dest} — ${reason}`,

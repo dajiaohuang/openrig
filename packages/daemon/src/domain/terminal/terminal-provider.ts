@@ -1,5 +1,6 @@
 import type { ViewerKey, ViewerResult } from "./herdr-viewer.js";
 import type { TaskMembership } from "./task-terminal-view.js";
+import type { FollowControls, FollowingStatus } from "./terminal-follow-policy.js";
 // OPR.0.4.6.02 C2 — the TerminalProvider abstraction (the CORE seam of the
 // terminal-provider ride).
 //
@@ -66,6 +67,8 @@ export interface ViewDescriptor { kind: "following" | "fixed"; name: string }
 
 export interface ComposedView {
   id: string;
+  /** Explicit daemon server for local viewer creation as well as its attached seats. */
+  localTmuxServer?: readonly string[];
   task?: TaskMembership;
   viewDescriptor?: ViewDescriptor;
   /** Service-provided preview fingerprint, attached after composition for provider labels. */
@@ -108,6 +111,9 @@ export interface ProviderLiveness {
  * pane that failed to render). `pages` is the number of grid pages painted.
  */
 export interface OpenViewResult {
+  /** Stable provider workspace of an explicitly following task. */
+  workspaceId?: string;
+  following?: FollowingStatus;
   provider: string;
   task?: TaskMembership;
   viewDescriptor?: ViewDescriptor;
@@ -145,4 +151,5 @@ export interface TerminalProvider {
   openView(view: ComposedView): Promise<OpenViewResult>;
   ensureViewer?(key: ViewerKey, pane: ComposedPane, stillCurrent?: () => Promise<boolean>): Promise<ViewerResult>;
   lookupViewer?(key: ViewerKey, pane: ComposedPane): Promise<ViewerResult>;
+  followView?(viewId: string, view: ComposedView | null, controls: FollowControls, stillCurrent: () => Promise<boolean>, membershipError?: string): Promise<OpenViewResult>;
 }

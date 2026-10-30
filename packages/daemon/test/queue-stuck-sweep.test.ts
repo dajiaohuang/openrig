@@ -23,6 +23,7 @@ import { migrate } from "../src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { QueueRepository, deriveCrossHostSuccessorId, type QueueItem } from "../src/domain/queue-repository.js";
 import { EventBus } from "../src/domain/event-bus.js";
+import { RigRepository } from "../src/domain/rig-repository.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { SettingsStore } from "../src/domain/user-settings/settings-store.js";
 import { archiveAgedTerminalTransitions } from "../src/domain/queue-retention.js";
@@ -110,6 +111,55 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
         (i.tags ?? []).some((t) => t.endsWith(`:${qitemId}`)),
     );
   }
+
+  it("#2278 keeps a local human decision on the attention surface without a false failed-wake finding", async () => {
+    const rigs = new RigRepository(db);
+    const rig = rigs.createRig("kernel");
+    rigs.addNode(rig.id, "operator.agent", { runtime: "terminal" });
+    const row = await repo.create({ sourceSession: "sender@r", destinationSession: "human@kernel", body: "Decide", summary: "Decision", evidenceRef: "decision.md", humanIntent: "decision" });
+    setNudgeResult(row.qitemId, "unroutable: 'human@kernel' has no terminal transport on this daemon and names no registered human", new Date(Date.now() - 10 * 60_000));
+    expect(repo.classifyDestinationOf("human@kernel").class).toBe("unroutable");
+    ageCreated(row.qitemId, 90);
+    expect(repo.listAttention().some(item => item.qitemId === row.qitemId)).toBe(true);
+    await runSweep();
+    expect(await findingsFor(row.qitemId)).toEqual([]);
+    expect(repo.waitingView(row.qitemId)?.nextBackstop.mechanism).toContain("local attention feed");
+  });
+
+  it("#2278 closes a prior failed-wake finding when the same decision is locally held", async () => {
+    const rigs = new RigRepository(db);
+    const rig = rigs.createRig("kernel");
+    rigs.addNode(rig.id, "operator.agent", { runtime: "terminal" });
+    const row = await repo.create({ sourceSession: "sender@r", destinationSession: "human@kernel", body: "Decide", summary: "Decision", evidenceRef: "decision.md", humanIntent: "decision" });
+    setNudgeResult(row.qitemId, "unroutable: no transport", new Date(Date.now() - 10 * 60_000));
+    ageCreated(row.qitemId, 90);
+    const local = vi.spyOn(repo, "isLocalHumanDecisionWithoutGateway").mockReturnValue(false);
+    await runSweep();
+    const prior = (await findingsFor(row.qitemId)).find(item => item.state === "pending");
+    expect(prior).toBeDefined();
+    local.mockRestore();
+    expect(repo.waitingView(row.qitemId)?.nextBackstop.mechanism).toContain("local attention feed");
+    await runSweep();
+    expect(repo.getById(prior!.qitemId)?.state).toBe("done");
+    expect(repo.getById(row.qitemId)?.state).toBe("pending");
+  });
+
+  it("#2278 does not suppress ordinary failures, external addresses, or an unreadable registry", async () => {
+    const row = await repo.create({ sourceSession: "sender@r", destinationSession: "human@kernel", body: "Decide", summary: "Decision", evidenceRef: "decision.md", humanIntent: "decision" });
+    vi.spyOn(repo, "classifyDestinationOf").mockReturnValue({ class: "unroutable", teaching: "no transport" });
+    const candidate = { ...row, lastNudgeResult: "unroutable: no transport" };
+    expect(repo.isLocalHumanDecisionWithoutGateway(candidate)).toBe(true);
+    expect(repo.isLocalHumanDecisionWithoutGateway({ ...candidate, lastNudgeResult: "failed: connection reset" })).toBe(false);
+    expect(repo.isLocalHumanDecisionWithoutGateway({ ...candidate, destinationSession: "person@external" })).toBe(false);
+    expect(repo.isLocalHumanDecisionWithoutGateway({ ...candidate, humanIntent: "update" })).toBe(false);
+    const broken = new QueueRepository(db, bus, { validateRig: () => true, loadHumanRegistry: () => ({ ok: false, error: "unreadable" }) });
+    expect(broken.isLocalHumanDecisionWithoutGateway(candidate)).toBe(false);
+    const empty = new QueueRepository(db, bus, { validateRig: () => true, loadHumanRegistry: () => ({ ok: false, error: "none", noHumans: true }) });
+    vi.spyOn(empty, "classifyDestinationOf").mockReturnValue({ class: "unroutable", teaching: "no transport" });
+    expect(empty.isLocalHumanDecisionWithoutGateway(candidate)).toBe(true);
+    const registered = new QueueRepository(db, bus, { validateRig: () => true, loadHumanRegistry: () => ({ ok: true, entities: [{} as HumanFragment] }) });
+    expect(registered.isLocalHumanDecisionWithoutGateway(candidate)).toBe(false);
+  });
 
   it("a row whose destination no longer resolves does not stop the other findings, and the pass still reports the failure", async () => {
     // A historic row addressed to a rig that has since gone: admitted when it was created, refused now.
@@ -330,6 +380,20 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     expect(finding!.body).toContain("worker@r is confirmed missing (session_missing), so this finding goes to sender@r, the row's creator");
   });
 
+  it("a retained exited pane sends its finding to the existing live recovery floor and preserves the original work", async () => {
+    seedMissingSession("worker@r");
+    const store = new SeatIdentityStore(db);
+    store.upsert({ ...store.getForNode("node-dead")!, evidenceSource: "pane_process", reason: "pane_exited" as never });
+    const row = await mkRow();
+    repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+    ageClaim(row.qitemId,60);
+    await runSweep({ resolveOperatorSeat: () => "operator@kernel" });
+    const [finding] = await findingsFor(row.qitemId);
+    expect(finding!.destinationSession).toBe("operator@kernel");
+    expect(repo.getById(row.qitemId)).toMatchObject({ qitemId:row.qitemId, body:"work", destinationSession:"worker@r", state:"in-progress" });
+    expect(finding!.body).toContain("pane_exited");
+  });
+
   it("with an operator seat set, a dead claimant's finding goes there, as the ladder's floor does", async () => {
     const row = await mkRow();
     repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
@@ -497,6 +561,40 @@ describe("S02 standing stuck sweep — both halves, routed findings, quiet-but-o
     if (recorded.class === "unroutable") setNudgeResult(row.qitemId, recorded.teaching, new Date());
     return row;
   }
+
+  // A bound terminal seat (a shell or a TUI, not an agent): the queue wake types nothing into it and nothing there can
+  // claim work, so its finding goes where an unroutable address's does, never to the seat itself.
+  it("work for a terminal seat is told to the person, not the seat, and says why", async () => {
+    seedLeadSeat();
+    db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime, cwd) VALUES ('node-log', 'rig-r', 'logger', 'terminal', '/tmp')").run();
+    db.prepare("INSERT INTO sessions (id, node_id, session_name, status, created_at) VALUES ('sess-log', 'node-log', 'logger@r', 'running', '2026-07-02 12:00:00')").run();
+    db.prepare("INSERT INTO bindings (id, node_id, attachment_type, tmux_session, tmux_pane) VALUES ('bind-log', 'node-log', 'tmux', 'logger@r', '%2')").run();
+    expect(repo.classifyDestinationOf("logger@r").class).toBe("pane-bound");
+    const row = await repo.create({ sourceSession: "lead@r", destinationSession: "logger@r", body: "work" });
+    setNudgeResult(row.qitemId, "failed:terminal-seat: 'logger@r' is a terminal seat (runtime: terminal), not an agent, so no wake was typed into it", new Date());
+    await runSweep({ resolveOperatorSeat: () => "person@external", resolveRecoveryAgentSeat: () => "operator-admin@kernel" });
+    const findings = await findingsFor(row.qitemId);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.destinationSession).toBe("person@external");
+    expect(findings[0]!.body).toContain("logger@r is a terminal seat; nothing there can claim this work, and no wake is typed into it. Route the work to an agent seat. This finding goes to person@external");
+  });
+
+  // The creator is a terminal seat too, so it can't take the finding either; with no person or operator agent, it stays.
+  it("work for a terminal seat with no person, agent creator or operator agent keeps its finding, and says why", async () => {
+    seedLeadSeat();
+    for (const [id, name, pane] of [["log", "logger", "%2"], ["mon", "monitor", "%3"]]) {
+      db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime, cwd) VALUES (?, 'rig-r', ?, 'terminal', '/tmp')").run(`node-${id}`, name);
+      db.prepare("INSERT INTO sessions (id, node_id, session_name, status, created_at) VALUES (?, ?, ?, 'running', '2026-07-02 12:00:00')").run(`sess-${id}`, `node-${id}`, `${name}@r`);
+      db.prepare("INSERT INTO bindings (id, node_id, attachment_type, tmux_session, tmux_pane) VALUES (?, ?, 'tmux', ?, ?)").run(`bind-${id}`, `node-${id}`, `${name}@r`, pane);
+    }
+    const row = await repo.create({ sourceSession: "monitor@r", destinationSession: "logger@r", body: "work" });
+    setNudgeResult(row.qitemId, "failed:terminal-seat: 'logger@r' is a terminal seat (runtime: terminal), not an agent, so no wake was typed into it", new Date());
+    await runSweep({ resolveOperatorSeat: () => null, resolveRecoveryAgentSeat: () => null });
+    const findings = await findingsFor(row.qitemId);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.destinationSession).toBe("logger@r");
+    expect(findings[0]!.body).toContain("logger@r is a terminal seat; nothing there can claim this work, and no wake is typed into it. Route the work to an agent seat. No person, creator or operator agent that can be reached is available, so this finding stays addressed to it");
+  });
 
   it("work for an address with no wake route (a hosted member) is told to the person, and says why", async () => {
     const row = await mkUnroutableRow();

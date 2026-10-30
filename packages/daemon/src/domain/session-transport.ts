@@ -1,3 +1,5 @@
+import { expectedConversation, sameConversation, resolveExpectedConversation, type ExpectedConversation } from "./expected-conversation.js";
+import type { ContextUsageStore } from "./context-usage-store.js";
 import { physicalSessionName } from "./session-registry.js";
 import { currentClaudeMcpMenu } from "./claude-mcp-menu.js";
 import { currentClaudeResumePicker } from "./native-resume-probe.js";
@@ -25,7 +27,7 @@ import {
   type ComposerSnapshot,
 } from "./composer-prompts.js";
 export { inspectStartupStagedText } from "./startup-submission-evidence.js";
-import { OutboxHandler } from "./outbox-handler.js";
+import { OutboxHandler, OutboxHandlerError } from "./outbox-handler.js";
 import { DraftAwareDelivery, type GuardedDeliverySummary, type QueueWakeFacts } from "./draft-aware-delivery.js";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
@@ -238,6 +240,8 @@ const CLAUDE_STATUS_WARNINGS = [
   /^Update available! Run: \S.*$/,
   // The context hint, as Claude prints it; reported as the last line below the mode bar on one seat.
   /^new task\? \/clear to save \d+(?:\.\d+)?k tokens$/,
+  // After Claude installs an update: "/restart to apply" (a Claude seat, 2026-10-30) or "Restart to apply".
+  /^✔ Update installed · (?:\/restart|Restart) to apply$/,
 ];
 // Current Claude status rows need not end in "thinking)" or show "esc to interrupt".
 // Completed summaries such as "✻ Crunched for 2s" lack the live ellipsis/timer shape.
@@ -398,10 +402,14 @@ export function inspectComposerInput(snapshot: ComposerSnapshot | null, runtime:
         || !alignedRule(lines[start - 1] ?? "") || !alignedRule(lines[claudeEnd] ?? "")) continue;
       end = claudeEnd;
     } else {
-      for (let i = start + 1; i < lines.length; i++) {
-        if (lines[i]!.trim()) continue;
-        const tail = lines.slice(i + 1).filter(line => line.trim());
-        if (lines[i + 1]?.trim() && tail.length === 1 && codexFooter(tail[0]!.trim())) { end = i; break; }
+      end = codexFooterSeparator(lines);
+      if (end < 0) {
+        // Keep the older one-row status/context footer shapes.
+        for (let i = start + 1; i < lines.length; i++) {
+          if (lines[i]!.trim()) continue;
+          const tail = lines.slice(i + 1).filter(line => line.trim());
+          if (lines[i + 1]?.trim() && tail.length === 1 && codexFooter(tail[0]!.trim())) { end = i; break; }
+        }
       }
     }
     if (end <= y || x < prefix) continue;
@@ -453,7 +461,8 @@ export function inspectComposerInput(snapshot: ComposerSnapshot | null, runtime:
     // Claude replaces its mode hint after our paste; that noninteractive hint is not a new composer.
     const stableFooter = prompt.glyph === "❯" && (CLAUDE_MODE_FOOTER.test(footer) || isClaudePasteHint(footer)) ? "claude-composer" : footer;
     const frame = JSON.stringify([prompt.glyph, prefix, width, stableFooter]);
-    const input: ComposerInput = { state: empty ? "empty" : "text", cursor: { ...snapshot.cursor }, suggestionRows, rows: visible, columns: width - prefix, cursorAtEnd, collapsedPaste: label, frame,
+    const nativeCodex = prompt.glyph !== "❯" && codexFooterSeparator(lines) === end;
+    const input: ComposerInput = { state: empty ? "empty" : "text", cursor: { ...snapshot.cursor }, suggestionRows, rows: visible, columns: width - prefix - (nativeCodex ? 1 : 0), cursorAtEnd, collapsedPaste: label, frame,
       ...(ghost ? { ghost } : {}) };
     // A numbered body is allowed only as this operation's exact text in its
     // previously empty composer. A newly observed menu gains no such authority.
@@ -462,6 +471,13 @@ export function inspectComposerInput(snapshot: ComposerSnapshot | null, runtime:
       && hasExpectedStagedText(`${prompt.glyph} ${visible.join("\n")}`, owned.text, runtime)) {
       input.collapsedPaste = visible.join("\n");
       input.pasteMatchesExpected = true;
+    }
+    if (nativeCodex) {
+      // Codex 0.164 fullscreen: composer <= 2/3 of the pane (at least eight
+      // rows, capped by the pane), less padding/status/hint rows. Leave the
+      // one-column right inset out of the native printable width.
+      input.pasteViewport = { columns: input.columns,
+        rows: Math.min(height, Math.max(8, Math.floor(height * 2 / 3))) - 4 };
     }
     candidates.push(input);
   }
@@ -1255,21 +1271,27 @@ const CODEX_HINT_ROW = /(?:^|\s)\? for shortcuts(?:\s|$)|⚠ \d+ warnings? · f2
 // Codex shows a long paste as this label until it is submitted. Matched on the normalized body.
 const CODEX_COLLAPSED_PASTE = /^\[PastedContent\d+chars\]$/;
 
-/** The current Codex input box: its normalized text ("" when empty), its rows as drawn (the prompt glyph removed)
- *  and where its prompt row is, or null when the layout is not the recognized one (another footer, a selector, no
- *  blank separator, an older TUI). */
-function codexInputBox(pane: string): { text: string; rows: string[]; lines: string[]; inputAt: number } | null {
-  const lines = pane.split("\n");
+/** The supported status/path + optional hint footer ends at the visible bottom.
+ * Share only its boundary: capture's placeholder heuristic is not close authority. */
+function codexFooterSeparator(lines: string[]): number {
   let last = lines.length - 1;
   while (last >= 0 && !lines[last]!.trim()) last--;
   let footerStart = last;
   while (footerStart > 0 && lines[footerStart - 1]!.trim()) footerStart--;
   const footer = lines.slice(footerStart, last + 1);
   if (last < 0 || footer.length > 2 || !CODEX_STATUS_LINE.test(footer[0]!)
-    || !footer.slice(1).every((row) => CODEX_HINT_ROW.test(row))) return null;
-  // promptAnswerStaged also ends a Codex input at a blank row.
+    || !footer.slice(1).every((row) => CODEX_HINT_ROW.test(row))) return -1;
   const separator = footerStart - 1;
-  if (separator < 1 || lines[separator]!.trim()) return null;
+  return separator >= 1 && !lines[separator]!.trim() ? separator : -1;
+}
+
+/** The current Codex input box: its normalized text ("" when empty), its rows as drawn (the prompt glyph removed)
+ *  and where its prompt row is, or null when the layout is not the recognized one (another footer, a selector, no
+ *  blank separator, an older TUI). */
+function codexInputBox(pane: string): { text: string; rows: string[]; lines: string[]; inputAt: number } | null {
+  const lines = pane.split("\n");
+  const separator = codexFooterSeparator(lines);
+  if (separator < 0) return null;
   const promptClass = composerPromptClassForRuntime("codex");
   const inputAt = findComposerInputLineIndex(lines.slice(0, separator), promptClass);
   if (inputAt < 0 || composerNumberedChoicePattern(promptClass).test(lines[inputAt]!.trimStart())) return null;
@@ -1700,6 +1722,7 @@ export function readInputBox(pane: string | null, runtime: "claude-code" | "code
 }
 
 export interface SendOpts {
+  expectedIdentity?: ExpectedConversation;
   /** Internal provenance derived by the transport route. */
   identityProvenance?: string;
   /** Internal: with identityProvenance principal:v1, the MCP adapter's caller (the route's resolveRecordedIdentity). */
@@ -1839,6 +1862,8 @@ export interface ExistingInput {
 type OverrideInputAudit = { classification: ExistingInput["classification"]; visibleRows: number; suggestionRows: number; choice: "inspect" | "type_without_checking"; outcome: "stopped" | "proceed"; clearAttempted: false };
 
 export interface SendResult {
+  checkedIdentity?: ExpectedConversation;
+  identityContract?: 1;
   existingInput?: ExistingInput;
   ok: boolean;
   sessionName: string;
@@ -1886,6 +1911,8 @@ export interface SendResult {
    *  `attempted` — the text write was issued and reported a failure (it may still have landed);
    *  `written` — the text was written and the send stopped before or at Enter (it may sit in the input box). */
   inputPhase?: "not_reached" | "attempted" | "written";
+  /** Typed refusal caught before any attempted/written input; never inferred from error text. */
+  noInputCode?: "retained_quota_full" | "terminal_seat";
 }
 
 /** One reading of a Claude Code or Codex input box: `exact` (the sent text, word boundaries kept), `ambiguous`
@@ -1939,6 +1966,7 @@ export interface TransportReadinessChecker {
 }
 
 interface SessionTransportDeps {
+  contextUsageStore?: ContextUsageStore;
   db: Database.Database;
   rigRepo: RigRepository;
   sessionRegistry: SessionRegistry;
@@ -1994,6 +2022,7 @@ interface SessionReconciliationSnapshot {
 }
 
 export class SessionTransport {
+  private contextUsageStore?: ContextUsageStore;
   readonly db: Database.Database;
   readonly guardedDelivery?: DraftAwareDelivery;
   private rigRepo: RigRepository;
@@ -2014,6 +2043,7 @@ export class SessionTransport {
   private verifyInputBox?: () => boolean;
 
   constructor(deps: SessionTransportDeps) {
+    this.contextUsageStore = deps.contextUsageStore;
     this.db = deps.db;
     this.rigRepo = deps.rigRepo;
     this.sessionRegistry = deps.sessionRegistry;
@@ -2406,6 +2436,61 @@ export class SessionTransport {
   }
 
   private async sendClassified(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
+    // Ordinary sends without an input ID have no stored constraint to hydrate.
+    if (!opts?.expectedIdentity && !opts?.deliveryId && !opts?.committedOutboxIds?.length) return this.sendClassifiedInput(sessionName, text, opts);
+    // The constraint belongs to the durable input, including later committed dispatch and ID reuse.
+    const outbox = new OutboxHandler(this.db);
+    let ids = opts?.committedOutboxIds ?? (opts?.deliveryId ? [opts.deliveryId] : []);
+    let admitted = false;
+    try {
+      let expected = opts?.expectedIdentity ? expectedConversation(opts.expectedIdentity) : undefined;
+      for (const id of ids) {
+        const saved = outbox.expectedIdentity(id);
+        if (!saved) continue;
+        const bound = expectedConversation(saved);
+        if (expected && !sameConversation(expected, bound)) throw new DeliveryGuardError("delivery_identity_conflict", "This input ID is bound to another original conversation.");
+        expected = bound;
+      }
+      if (!expected) return this.sendClassifiedInput(sessionName, text, opts);
+      if (sessionName !== expected.sessionName) throw new DeliveryGuardError("expected_identity_mismatch", "The destination must be the expected canonical session.");
+      if (!ids.length) ids = [`expected-send-${randomUUID()}`];
+      this.db.transaction(() => {
+        for (const id of ids) {
+          const prior = opts?.committedOutboxIds ? outbox.getById(id) : null;
+          if (opts?.committedOutboxIds && !prior) throw new DeliveryGuardError("delivery_identity_conflict", "Committed input ID is missing.");
+          outbox.bindExpectedIdentity(prior ? { ...prior, outboxId: id, tags: prior.tags ?? undefined, auditPointer: prior.auditPointer ?? undefined } : {
+            outboxId: id, senderSession: opts?.actorSession ?? "unknown", destinationSession: sessionName, body: text,
+            identityProvenance: opts?.identityProvenance, identityPrincipal: opts?.identityPrincipal,
+          }, expected!);
+        }
+      })();
+      admitted = true;
+      await resolveExpectedConversation(expected, this.sessionRegistry, this.tmuxAdapter, this.contextUsageStore);
+      const result = await this.sendClassifiedInput(sessionName, text, { ...opts, expectedIdentity: expected,
+        ...(opts?.committedOutboxIds ? {} : { deliveryId: ids[0] }) });
+      if (result.outcome !== "retained") {
+        try {
+          for (const id of ids) {
+            if (result.ok) outbox.markDelivered(id);
+            else if (result.sent === false || result.inputPhase === "not_reached") outbox.markFailed(id);
+            else outbox.markIndeterminate(id);
+          }
+        } catch { result.warning = [result.warning, "Conditional input receipt could not be finalized; inspect before retrying."].filter(Boolean).join(" "); }
+      }
+      return { ...result, identityContract: 1, outboxIds: result.outboxIds ?? ids };
+    } catch (error) {
+      // Before-input conditional failures never fall back to an ordinary send.
+      const written = (error as { inputWritten?: boolean }).inputWritten;
+      const attempted = (error as { inputAttempted?: boolean }).inputAttempted;
+      if (admitted && !written && !attempted) for (const id of ids) { try { if (outbox.getById(id)) outbox.markFailed(id); } catch { /* Original refusal remains authoritative. */ } }
+      return { ok: false, sessionName, identityContract: 1, outboxIds: ids,
+        sent: written ? true : attempted ? undefined : false,
+        inputPhase: written ? "written" : attempted ? "attempted" : "not_reached",
+        reason: (error as { code?: string }).code ?? "expected_identity_unavailable", error: (error as Error).message };
+    }
+  }
+
+  private async sendClassifiedInput(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
     const guard = this.tmuxAdapter.deliveryGuard;
     const admission: AdmissionInput = { source: opts?.openrigNotice ? "openrig" : "agent", urgent: !!opts?.urgent, override: opts?.dangerouslyInteract === true };
     if (!guard) {
@@ -2477,7 +2562,7 @@ export class SessionTransport {
         if (this.guardedDelivery && !memberOpts?.submitOnly && !memberOpts?.dangerouslyInteract && guard.needsInputCheck(sessionName)) {
           if (callerSignal(memberOpts)?.aborted) return callerCancelled(sessionName);
           return this.guardedDelivery.send(sessionName, memberText, memberOpts ?? {},
-            memberOpts?.committedOutboxIds ?? [`guard-send-${randomUUID()}`]);
+            memberOpts?.committedOutboxIds ?? [memberOpts?.expectedIdentity && memberOpts.deliveryId ? memberOpts.deliveryId : `guard-send-${randomUUID()}`]);
         }
         return this.sendUnguarded(sessionName, memberText, memberOpts);
       }, async target => {
@@ -2530,7 +2615,10 @@ export class SessionTransport {
         return { ok: false, sessionName, outcome: "failed", inputPhase: "attempted", reason: (error as { code?: string }).code ?? "delivery_indeterminate",
           error: `A text write to '${sessionName}' was issued, but its result was lost: ${(error as Error).message}` };
       }
-      return { ok: false, sessionName, sent: false, reason: (error as { code?: string }).code ?? "guard_unavailable", error: (error as Error).message };
+      const noInputCode = error instanceof OutboxHandlerError && error.code === "retained_quota_full" ? "retained_quota_full" as const
+        : error instanceof DeliveryGuardError && error.code === "terminal_seat" ? "terminal_seat" as const : undefined;
+      return { ok: false, sessionName, sent: false, reason: (error as { code?: string }).code ?? "guard_unavailable", error: (error as Error).message,
+        ...(noInputCode ? { noInputCode, inputPhase: "not_reached" as const } : {}) };
     }
   }
 
@@ -2595,7 +2683,7 @@ export class SessionTransport {
           sessionName,
           sent: false,
           reason: "target_runtime_unverified",
-          error: `Refused: '${sessionName}' reports ${unverified} as the foreground command, but OpenRig could not verify its expected ${runtime} agent in the bound pane. The agent may still be running behind a wrapper. No text was sent.`,
+          error: `Refused: '${sessionName}' reports ${unverified} as the foreground command, but OpenRig could not verify its expected ${runtime} agent in the bound pane. The agent may still be running behind a wrapper. No text was sent. Delivery depends on verifying the bound pane and its input-owning agent; a live process alone is insufficient. Check what is running in the pane with rig capture <session>; if the agent has exited to its shell, start it again before resending.`,
         } };
       }
     }
@@ -2678,6 +2766,13 @@ export class SessionTransport {
     sessionName = physicalSessionName(this.db, sessionName);
     let preVerifyContent: string | null = null;
     const sessionMeta = this.getSessionMeta(sessionName);
+    let checkedIdentity: ExpectedConversation | undefined;
+    let originalCheck: Awaited<ReturnType<typeof resolveExpectedConversation>> | undefined;
+    const checkOriginal = opts?.expectedIdentity ? async () => {
+      originalCheck = await resolveExpectedConversation(opts.expectedIdentity!, this.sessionRegistry, this.tmuxAdapter, this.contextUsageStore);
+      checkedIdentity = originalCheck.identity;
+    } : undefined;
+    const beforeOriginalInput = () => { originalCheck?.assertCurrent(); opts?.beforeWrite?.(); };
     const runtime = sessionMeta.runtime;
     const readTarget = sessionMeta.pane ?? sessionName;
     let runtimeAdvisory: string | undefined;
@@ -2726,6 +2821,7 @@ export class SessionTransport {
     let existingInput: ExistingInput | undefined;
     let overrideBeforePaste: (() => Promise<void>) | undefined;
     const observe = (result: SendResult): SendResult => {
+      if (checkedIdentity) result = { ...result, checkedIdentity, identityContract: 1 };
       if (existingInput) result = { ...result, existingInput };
       if (result.ok && runtimeAdvisory) result = { ...result, warning: [runtimeAdvisory, result.warning].filter(Boolean).join(" ") };
       if (observed && this.captureObserver) {
@@ -2767,7 +2863,7 @@ export class SessionTransport {
         sessionName,
         sent: false,
         reason: "target_runtime_unverified",
-        error: `Refused: '${sessionName}' reports ${unverifiedShell} as the foreground command, but OpenRig could not verify its expected ${runtime} agent in the bound pane. The agent may still be running behind a wrapper. No text was sent.`,
+        error: `Refused: '${sessionName}' reports ${unverifiedShell} as the foreground command, but OpenRig could not verify its expected ${runtime} agent in the bound pane. The agent may still be running behind a wrapper. No text was sent. Delivery depends on verifying the bound pane and its input-owning agent; a live process alone is insufficient. Check what is running in the pane with rig capture <session>; if the agent has exited to its shell, start it again before resending.`,
       });
     }
 
@@ -2880,7 +2976,8 @@ export class SessionTransport {
       try {
         submitResult = await this.runStage(
           "session_transport.submit",
-          () => beforeKey ? this.tmuxAdapter.sendKeys(sessionName, ["Enter"], beforeKey) : this.tmuxAdapter.sendKeys(sessionName, ["Enter"]),
+          () => checkOriginal ? this.tmuxAdapter.sendKeys(sessionName, ["Enter"], () => { beforeOriginalInput(); beforeKey?.(); }, { beforeKeys: checkOriginal })
+            : beforeKey ? this.tmuxAdapter.sendKeys(sessionName, ["Enter"], beforeKey) : this.tmuxAdapter.sendKeys(sessionName, ["Enter"]),
           (result) => result.ok ? "ok" : "failed",
         );
       } catch (error) {
@@ -2890,7 +2987,7 @@ export class SessionTransport {
       }
       if (!submitResult.ok && submitResult.code === CALLER_CANCELLED && cancel?.aborted) return callerCancelled(sessionName);
       if (!submitResult.ok) {
-        return { ok: false, sessionName, reason: "submit_failed", outcome: "failed", error: `submitOnly: Enter did not land on '${sessionName}': ${submitResult.message}` };
+        return { ok: false, sessionName, ...(submitResult.code?.startsWith("expected_identity_") ? { sent: false, inputPhase: "not_reached" as const } : {}), reason: submitResult.code?.startsWith("expected_identity_") ? submitResult.code : "submit_failed", outcome: "failed", error: `submitOnly: Enter did not land on '${sessionName}': ${submitResult.message}` };
       }
       try { opts.onInputEffect?.("submitted"); } catch { /* Observation cannot change an input result. */ }
       return observe({ ok: true, sessionName, outcome: "rendered-unconfirmed", submitOnly: true });
@@ -3194,6 +3291,9 @@ export class SessionTransport {
       () => {
         opts?.beforeWrite?.();
         writeIssued = true;
+        if (checkOriginal) return this.tmuxAdapter.sendText(sessionName, text, () => { beforeOriginalInput(); beforePaste?.(); }, {
+          ...(promptOverride ? { bracketed: false } : {}), beforePaste: async () => { await overrideBeforePaste?.(); await checkOriginal(); },
+        });
         if (promptOverride) return this.tmuxAdapter.sendText(sessionName, text, beforePaste, { bracketed: false, beforePaste: overrideBeforePaste });
         return beforePaste ? this.tmuxAdapter.sendText(sessionName, text, beforePaste) : this.tmuxAdapter.sendText(sessionName, text);
       },
@@ -3204,7 +3304,7 @@ export class SessionTransport {
     }
     if (!textResult.ok) {
       // A draft refusal is the guard holding the write before any input; it is not an attempted write.
-      const policyRefusal = typeof textResult.code === "string" && (textResult.code.startsWith("draft_") || textResult.code.startsWith("override_input_") || textResult.code === "managed_compaction_pending");
+      const policyRefusal = typeof textResult.code === "string" && (textResult.code.startsWith("expected_identity_") || textResult.code.startsWith("draft_") || textResult.code.startsWith("override_input_") || textResult.code === "managed_compaction_pending");
       return observe({
         ok: false,
         sessionName,
@@ -3256,11 +3356,15 @@ export class SessionTransport {
       // 5. Submit (Enter)
       submitResult = await this.runStage(
         "session_transport.submit",
-        () => { opts?.beforeWrite?.(); enterIssued = true; return opts?.beforeWrite ? this.tmuxAdapter.sendKeys(sessionName, ["Enter"], opts.beforeWrite) : this.tmuxAdapter.sendKeys(sessionName, ["Enter"]); },
+        () => {
+          if (checkOriginal) return this.tmuxAdapter.sendKeys(sessionName, ["Enter"], () => { beforeOriginalInput(); enterIssued = true; }, { beforeKeys: checkOriginal });
+          opts?.beforeWrite?.(); enterIssued = true;
+          return opts?.beforeWrite ? this.tmuxAdapter.sendKeys(sessionName, ["Enter"], opts.beforeWrite) : this.tmuxAdapter.sendKeys(sessionName, ["Enter"]);
+        },
         (result) => result.ok ? "ok" : "failed",
       );
       if (!submitResult.ok) {
-        const policyRefusal = typeof submitResult.code === "string" && (submitResult.code.startsWith("draft_") || submitResult.code === "managed_compaction_pending");
+        const policyRefusal = typeof submitResult.code === "string" && (submitResult.code.startsWith("expected_identity_") || submitResult.code.startsWith("draft_") || submitResult.code === "managed_compaction_pending");
         return observe({
           ok: false,
           sessionName,

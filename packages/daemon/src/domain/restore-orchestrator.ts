@@ -6,11 +6,12 @@ import { assessSnapshotCurrentOccupants, stoppedSnapshotReason } from "./rehydra
 import { nonInterruptiveNotice, nonInterruptiveSummary } from "../adapters/non-interruptive.js";
 import { planModelAliasNotice } from "../adapters/yolo-mode.js";
 import { effortPrecedence, readSeatEffort } from "./seat-effort.js";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 import { ensureSeatSkillPlugin, hasSeatSkillRecords, rehydrateSeatSkills, seatSkillPaths, seatSkillPathsForNode, seatCatalogKeptNote, seatSkillReplay, writeSeatSkillCatalog, type SeatSkillRehydration, writeSeatSkillRouter, seatRouterKeptNote } from "./seat-skill-storage.js";
 import type Database from "better-sqlite3";
 import { NativePermissionStore } from "./native-permission-store.js";
+import { readSeatClaudeMcp, type ClaudeMcp } from "./claude-mcp.js";
 import type { RigRepository } from "./rig-repository.js";
 import { resolvePermissionPolicyAttachment } from "./permission-policy/policy-ref.js";
 import { claudeResumeRotation, type SessionRegistry } from "./session-registry.js";
@@ -29,7 +30,8 @@ import type { OmpResumeAdapter } from "../adapters/omp-resume.js";
 import type { TranscriptStore } from "./transcript-store.js";
 import { assessNativeResumeProbe } from "./native-resume-probe.js";
 import { resumeProbeEvidence, type NativeResumeProbeEvidence } from "./native-resume-probe-evidence.js";
-import { observeClaudeDelivery, observeClaudeResumeLaunch, verifyClaudePaneProcess, verifyPaneIdleShell, type ClaudeLaunchedProcess } from "./native-process-lineage.js";
+import { observeClaudeDelivery, observeClaudeResumeLaunch, processArgv, verifyClaudePaneProcess, verifyClaudePaneRuntime, verifyPaneIdleShell, type ClaudeLaunchedProcess } from "./native-process-lineage.js";
+import { readNativeExecutablePaths } from "./native-process-executable.js";
 import { reanchorBuiltinStartupFile, reanchorShippedProjectionEntry } from "./builtin-startup-files.js";
 import { applySeatSkillsLineRule, seatGuidance, restoreMissingGuidance, missingGuidanceBlocks } from "./restore-guidance.js";
 import { readFootprintAnswer } from "./footprint-choice.js";
@@ -47,7 +49,6 @@ import type {
   RestoreSnapshotSelection,
 } from "./types.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
-import { classifyPaneRuntimeMatch } from "./seat-identity-reconciler.js";
 import { isShellForeground } from "./shell-classifier.js";
 import { rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
@@ -90,7 +91,7 @@ const LAUNCH_DEPENDENCY_KINDS = new Set(["delegates_to", "spawned_by"]);
 // in the pure leaf module active-occupant.ts, shared with preview, snapshot
 // usability, and lifecycle projection. Imported and re-exported here so the
 // existing export surface and the execution call sites below are unchanged.
-import { resolveActiveSnapshotSession, activeOccupantAmbiguityError, absentSeatResumeHistory, absentSeatResumeHistoryError, freshSeatLaunchCommand } from "./active-occupant.js";
+import { resolveActiveSnapshotSession, activeOccupantAmbiguityError, absentSeatResumeHistory, absentSeatResumeHistoryError, freshSeatLaunchCommand, seatStopCommand } from "./active-occupant.js";
 import { effectiveRestorePolicy, isOrdinaryTerminalSeat, type RestoreSeatFacts, communityLaunchOnlyRestoreReason } from "./restore-policy.js";
 import { communityHarnessOf } from "./built-in-runtimes.js";
 import { communityHarnessStopsRestore } from "./community-harness-presets.js";
@@ -150,6 +151,20 @@ export function launchStatusIsRunning(status: string): boolean {
 /** The facts effectiveRestorePolicy reads for one saved seat: its saved runtime, the runtime it has now, and its recorded sessions. */
 function seatFacts(data: SnapshotData, nodeId: string, savedRuntime: string | null, currentRuntime: string | null): RestoreSeatFacts {
   return { savedRuntime, currentRuntime, recordedSessions: data.sessions.filter((session) => session.nodeId === nodeId) };
+}
+
+/** Whether an automatic periodic carry is still the seat's current resumable session when `rig launch` uses it: capture-time
+ *  eligibility can have expired without another tick, and a conversation a fresh launch retired is never resumed. */
+export function periodicCarryIsCurrent(db: Database.Database, rigSessions: readonly Session[], rigId: string, nodeId: string,
+  carried: Session, liveRuntime: string | null | undefined, savedRuntime: string | null | undefined): boolean {
+  const newest = rigSessions.filter(row => row.nodeId === nodeId)
+    .reduce<Session | null>((latest, row) => !latest || row.id > latest.id ? row : latest, null);
+  const fresh = readFreshOccupantRelations(db, rigId);
+  return !(!absentSeatResumeHistory([carried], nodeId) || !newest || newest.id !== carried.id
+    || newest.restorePolicy !== "resume_if_possible" || newest.status === "superseded"
+    || liveRuntime !== savedRuntime
+    || (!!newest.resumeToken?.trim() && (newest.resumeToken !== carried.resumeToken || newest.resumeType !== carried.resumeType))
+    || (Object.hasOwn(fresh, nodeId) && fresh[nodeId] !== carried.id));
 }
 
 /** What `rig launch` does for this node from this snapshot without --fresh, read as the restore path reads it: the
@@ -304,6 +319,7 @@ export class RestoreOrchestrator {
    * Launch preparation and native existence checks remain on the execution path. */
   canAttemptRecordedResume(runtime: string | null, resumeType: string | null, resumeToken: string | null): boolean {
     if (typeof resumeToken !== "string" || !resumeToken.trim()) return false;
+    if (runtime === "openshell-claude") return resumeType === "community:openshell-claude";
     if (runtime === "codex") return resumeType === "codex_id" && this.codexResume.canResume(resumeType, resumeToken);
     if (runtime === "claude-code") return this.claudeResume.canResume(resumeType, resumeToken);
     return false;
@@ -629,6 +645,9 @@ export class RestoreOrchestrator {
     const matchedIds = new Set(targetNodes.map((n) => n.logicalId));
     const unmatchedIds = logicalIds.filter((id) => !matchedIds.has(id));
     if (targetNodes.length === 0) return { ok: false, code: "no_matching_nodes", message: `No nodes match logical ids: ${logicalIds.join(", ")}` };
+    if (targetNodes.some(saved => !allNodes.some(current => current.id === saved.id && current.logicalId === saved.logicalId))) {
+      return { ok: false, code: "selection_changed", message: "A snapshot seat was removed or recreated. Select history for the current seat." };
+    }
     if (opts.selectedHistory && (targetNodes.length !== 1 || targetNodes[0]!.id !== opts.selectedHistory.nodeId
       || !allNodes.some(node => node.id === opts.selectedHistory!.nodeId && node.logicalId === logicalIds[0]))) {
       return { ok: false, code: "selection_changed", message: "The selected node is no longer this seat." };
@@ -1094,14 +1113,7 @@ export class RestoreOrchestrator {
       // The launch lifecycle lease is held here, before any stale-state cleanup
       // or destination registration. Capture-time eligibility can have expired
       // without another tick; never resume a conversation a fresh launch retired.
-      const newest = this.sessionRegistry.getSessionsForRig(rigId).filter(row => row.nodeId === nodeId)
-        .reduce<Session | null>((latest, row) => !latest || row.id > latest.id ? row : latest, null);
-      const fresh = readFreshOccupantRelations(this.db, rigId);
-      if (!absentSeatResumeHistory([carried], nodeId) || !newest || newest.id !== carried.id
-        || newest.restorePolicy !== "resume_if_possible" || newest.status === "superseded"
-        || liveNode?.runtime !== node.runtime
-        || (!!newest.resumeToken?.trim() && (newest.resumeToken !== carried.resumeToken || newest.resumeType !== carried.resumeType))
-        || (Object.hasOwn(fresh, nodeId) && fresh[nodeId] !== carried.id)) {
+      if (!periodicCarryIsCurrent(this.db, this.sessionRegistry.getSessionsForRig(rigId), rigId, nodeId, carried, liveNode?.runtime, node.runtime)) {
         return { nodeId, logicalId: node.logicalId, status: "awaiting-decision",
           error: "The periodic resume source is no longer this seat's current resumable session. No session was started. Review its history or deliberately start this seat fresh." };
       }
@@ -1200,6 +1212,8 @@ export class RestoreOrchestrator {
     if (opts?.keepPane && (!keptPane || !priorState.binding?.tmuxSession)) {
       return { nodeId, logicalId: node.logicalId, status: "failed", error: `${node.logicalId} has no bound tmux pane to keep, so nothing was stopped.` };
     }
+    // Read before takeover ends the process. An unavailable witness keeps normal launch resolution unchanged.
+    const claudeExecutable = keptPane && node.runtime === "claude-code" ? await this.claudeContinuationExecutable(keptPane) : undefined;
 
     // Clear stale state so NodeLauncher doesn't see already_bound. A kept pane keeps its binding through the takeover: the
     // delivery guard resolves the pane through it.
@@ -1346,9 +1360,25 @@ export class RestoreOrchestrator {
       warnings?.push(...launchResult.warnings);
     }
 
-    const restored = await this.postLaunchRestore(entry, rigId, data, launchResult.sessionName, launchResult, opts, warnings, priorState, seatRehydration, resumeSession);
-    const checked = this.checkRestoredGuidance(restored, entry.node, rigId, data, warnings);
+    const restored = await this.postLaunchRestore(entry, rigId, data, launchResult.sessionName, launchResult,
+      { ...opts, ...(claudeExecutable ? { claudeExecutable } : {}) }, warnings, priorState, seatRehydration, resumeSession);
+    const checked = { ...this.checkRestoredGuidance(restored, entry.node, rigId, data, warnings),
+      ...(keptPane ? { launchStarted: true as const } : {}) };
     return selectedHistory ? { ...checked, sourceSessionId: selectedHistory.historySessionId, resultSessionId: launchResult.session.id } : checked;
+  }
+
+  private async claudeContinuationExecutable(pane: string): Promise<string | undefined> {
+    const native = await verifyClaudePaneRuntime({ target: pane, tmux: this.tmuxAdapter,
+      ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}) });
+    if (!native) return undefined;
+    const argv0 = processArgv(native.process.command)[0];
+    const executable = argv0 && isAbsolute(argv0) ? argv0 : native.process.executablePath
+      ?? (await readNativeExecutablePaths([native.process.pid])).get(native.process.pid);
+    try {
+      if (!executable || !isAbsolute(executable)) return undefined;
+      accessSync(executable, constants.X_OK);
+      return statSync(executable).isFile() ? realpathSync(executable) : undefined;
+    } catch { return undefined; }
   }
 
   /** A seat that came back running should also have its role, culture and SOP guidance. If its
@@ -1392,8 +1422,8 @@ export class RestoreOrchestrator {
   }
 
   /** OPR.0.3.4.2 (B) — roll a just-launched session back to ZERO sessions for
-   *  the awaiting-decision outcome: kill the live blank session, mark its row
-   *  superseded, and restore the prior binding/session state (the existing
+   *  the awaiting-decision outcome: remove a new blank terminal (preserving a
+   *  reused pane), mark its row superseded, and restore the prior state (the existing
    *  launch-failure compensating action). The caller fires this ONLY on a
    *  POSITIVE determination the session is fresh/blank — never for
    *  unknown-but-possibly-valid continuity. */
@@ -1403,17 +1433,21 @@ export class RestoreOrchestrator {
     launchedSessionId: string | undefined,
     priorState: { binding: import("./types.js").Binding | null; sessions: { id: string; status: string }[] } | undefined,
     assertCurrent?: () => boolean,
+    keepPane = false,
   ): Promise<boolean> {
     if (assertCurrent && !assertCurrent()) return false;
-    try {
-      await this.tmuxAdapter.killSession(sessionName);
-    } catch { /* best-effort — the row + projection rollback below is the source of truth */ }
+    if (!keepPane) {
+      try {
+        await this.tmuxAdapter.killSession(sessionName);
+      } catch { /* best-effort — the row + projection rollback below is the source of truth */ }
+    }
     if (assertCurrent && !assertCurrent()) return false;
     if (launchedSessionId) {
       try { this.sessionRegistry.updateStatus(launchedSessionId, "superseded"); } catch { /* best-effort */ }
     }
     if (priorState) {
-      this.restoreNodeState(nodeId, priorState);
+      // Pane takeover already ended the predecessor; keep its retired status.
+      this.restoreNodeState(nodeId, keepPane ? { ...priorState, sessions: [] } : priorState);
     }
     return true;
   }
@@ -1440,6 +1474,11 @@ export class RestoreOrchestrator {
     return freshSeatLaunchCommand(logicalId, this.rigRepo.getRig(rigId)?.rig.name ?? data.rig.name);
   }
 
+  /** The stop a restore reason names first when the rollback kept the seat's pane, so its session is still there. */
+  private stopSeatCommand(rigId: string, data: SnapshotData, logicalId: string): string {
+    return seatStopCommand(logicalId, this.rigRepo.getRig(rigId)?.rig.name ?? data.rig.name);
+  }
+
   /** Replay the preflight-selected source after launch, keeping native identity and startup checks. */
   private async postLaunchRestore(
     entry: PlanEntry,
@@ -1447,7 +1486,7 @@ export class RestoreOrchestrator {
     data: SnapshotData,
     sessionName: string,
     launchResult?: { ok: true; sessionName: string; session: import("./types.js").Session; binding: import("./types.js").Binding },
-    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; selectedHistory?: SelectedRestoreHistory },
+    opts?: { adapters?: Record<string, import("./runtime-adapter.js").RuntimeAdapter>; fsOps?: { exists(path: string): boolean }; freshLogicalIds?: string[]; selectedHistory?: SelectedRestoreHistory; claudeExecutable?: string; keepPane?: boolean },
     warnings?: string[],
     priorState?: { binding: import("./types.js").Binding | null; sessions: { id: string; status: string }[] },
     seatRehydration?: SeatSkillRehydration,
@@ -1471,6 +1510,17 @@ export class RestoreOrchestrator {
       }
       return restoreEffort.effort;
     };
+    // The model `rig seat set-model` saved after the snapshot is the newer choice, and it says so when it differs.
+    let restoreModel: string | null | undefined;
+    const modelForRestore = (): string | null => {
+      if (restoreModel === undefined) {
+        restoreModel = this.liveModel(rigId, node, selected?.nodeId);
+        if (node.model && restoreModel !== node.model) {
+          warnings?.push(`Restore: ${node.logicalId}: this restore launched the seat's saved model ${restoreModel}, not ${node.model} from the snapshot.`);
+        }
+      }
+      return restoreModel;
+    };
     // OPR.0.5.7.1 D1 — the active occupant is RESOLVED, never inferred from
     // row ordering (cite site 2 of 2; "latest = max id" was the incident's
     // defect: a superseded row with a newer ULID defeated the real occupant).
@@ -1478,6 +1528,7 @@ export class RestoreOrchestrator {
     const rollbackOwnBlank = async (): Promise<boolean> => this.rollbackToZeroSession(
       node.id, sessionName, launchResult?.session.id, priorState,
       selected ? () => selected.beforeNative(launchResult?.session.id, launchResult?.binding.id) : undefined,
+      opts?.keepPane,
     );
     const changedDuringRollback = (): RestoreNodeResult => ({ nodeId: node.id, logicalId: node.logicalId,
       status: "attention_required", error: "The selected terminal or source changed during cleanup. Its current owner was preserved; inspect the partial launch before retrying." });
@@ -1597,8 +1648,8 @@ export class RestoreOrchestrator {
           } catch { /* best-effort: without it a rotation stays unproved, as before */ }
         }
         if (selected && !selected.beforeNative(launchedSessionId, launchResult?.binding.id)) return { nodeId: node.id, logicalId: node.logicalId, status: "attention_required", error: "The selected seat, settings or history changed after shell creation; native resume was not dispatched." };
-        const resumeOutcome = await this.attemptResume(node.id, sessionName, resumeType, resumeToken, node.cwd ?? "/", this.liveCodexProfile(rigId, node, selected?.nodeId), node.model, this.resolveRestorePosture(node.id, rigId), effortForRestore(), warnings, node.advisor,
-          selected ? () => selected.beforeNative(launchedSessionId, launchResult?.binding.id) : undefined);
+        const resumeOutcome = await this.attemptResume(node.id, sessionName, resumeType, resumeToken, node.cwd ?? "/", this.liveCodexProfile(rigId, node, selected?.nodeId), modelForRestore(), this.resolveRestorePosture(node.id, rigId), effortForRestore(), warnings, node.advisor,
+          selected ? () => selected.beforeNative(launchedSessionId, launchResult?.binding.id) : undefined, opts?.claudeExecutable);
         if (resumeOutcome.kind === "resumed") {
           baseStatus = "resumed";
           if (launchedSessionId && this.claudeResume.canResume(resumeType, resumeToken)) {
@@ -1692,6 +1743,8 @@ export class RestoreOrchestrator {
     const replayContained = resumeRequested && !!resumeToken;
     const startupRuntime = startupCtx?.runtime ?? node.runtime ?? null;
     const startupAdapter = seatAdapter(opts?.adapters, startupRuntime, session?.communityHarness);
+    // New compute has no retained context filesystem. Restore the saved file selection, never conversation actions.
+    const restoreEnvironmentContext = replayContained && !!startupAdapter?.environment && !!data.environmentBindingsByNode?.[node.id];
 
     // A new pod-aware agent needs a startup context to run StartupOrchestrator.
     // Do not report a healthy fresh-primed result when that context or adapter
@@ -1758,9 +1811,9 @@ export class RestoreOrchestrator {
         if (adapter) {
           // Prefilter: check which files/entries still exist
           const existsFn = opts.fsOps?.exists ?? (() => true);
-          const sourceEntries = replayContained ? [] : startupCtx.projectionEntries.map((e) => reanchorShippedProjectionEntry(e, undefined, existsFn));
+          const sourceEntries = replayContained && !restoreEnvironmentContext ? [] : startupCtx.projectionEntries.map((e) => reanchorShippedProjectionEntry(e, undefined, existsFn));
           // #261: recognized built-in startup files follow the running install.
-          const sourceFiles = replayContained ? [] : startupCtx.resolvedStartupFiles.map((f) => reanchorBuiltinStartupFile(f, undefined, undefined, existsFn));
+          const sourceFiles = replayContained && !restoreEnvironmentContext ? [] : startupCtx.resolvedStartupFiles.map((f) => reanchorBuiltinStartupFile(f, undefined, undefined, existsFn));
           const sourceActions = replayContained ? [] : startupCtx.startupActions;
           const filteredEntries = sourceEntries.filter((e) => {
             if (!existsFn(e.absolutePath)) {
@@ -1819,6 +1872,8 @@ export class RestoreOrchestrator {
 
           const binding = {
             ...launchResult.binding,
+            ...(data.environmentBindingsByNode?.[node.id] ? { environmentRestore: data.environmentBindingsByNode[node.id] } : {}),
+            ...(opts?.claudeExecutable ? { claudeExecutable: opts.claudeExecutable } : {}),
             cwd: node.cwd ?? ".",
             codexConfigProfile: this.liveCodexProfile(rigId, node, selected?.nodeId) ?? undefined,
             // OPR.0.4.8.3 Seam B: the pod-aware restore path binds the restored posture too
@@ -1830,7 +1885,7 @@ export class RestoreOrchestrator {
             // the declared provider) passed nothing through ("No API key
             // found" on every resumed Pi seat). Claude/Codex silently lost
             // their -m/--model on restore the same way.
-            model: node.model ?? undefined,
+            model: modelForRestore() ?? undefined,
             effort: effortForRestore() ?? undefined,
             advisor: node.advisor ?? undefined,
           };
@@ -1915,11 +1970,16 @@ export class RestoreOrchestrator {
               // with its pane and binding kept, so its output can still be read.
               if (startupResult.missingConversation) {
                 if (!await rollbackOwnBlank()) return changedDuringRollback();
+                // The records can't tell a seat that was never used from one whose conversation is elsewhere (a moved
+                // account or folder), so the seat waits for the person who knows, with the steps that start it fresh. A kept
+                // pane leaves the seat's own tmux session at a shell, which the fresh launch won't replace until it's stopped.
+                const fresh = this.freshSeatCommand(rigId, data, node.logicalId);
+                const steps = opts?.keepPane ? `in two steps: ${this.stopSeatCommand(rigId, data, node.logicalId)}, then ${fresh}` : `in one step: ${fresh}`;
                 return {
                   nodeId: node.id,
                   logicalId: node.logicalId,
                   status: "awaiting-decision",
-                  error: `Original session unresumable: ${startupResult.errors.join("; ")}. The blank session was rolled back; no session is running. Restore the original session manually, or deliberately start only this seat fresh: ${this.freshSeatCommand(rigId, data, node.logicalId)}.`,
+                  error: `Original session unresumable: ${startupResult.errors.join("; ")}. The blank session was rolled back; no session is running. OpenRig's records can't tell whether this conversation was ever used. If you know this seat was never used, nothing is lost by starting only this seat fresh, ${steps}. Otherwise restore the original session manually.`,
                 };
               }
               return {
@@ -2034,10 +2094,7 @@ export class RestoreOrchestrator {
     }
     // Legacy resume adapters do not write native metadata. Fill only the
     // launched row's empty token after proof; never overwrite a hook/operator.
-    const provedClaudeWrapper = node.runtime === "claude-code"
-      && classifyPaneRuntimeMatch(identity.command, node.runtime) === "mismatch"
-      && isShellForeground(identity.command?.trim().toLowerCase() ?? "");
-    if ((node.runtime === "codex" || provedClaudeWrapper || managedClaudeResume) && sessionId && resumeToken) {
+    if ((node.runtime === "codex" || node.runtime === "claude-code") && sessionId && resumeToken) {
       const current = this.db.prepare("SELECT node_id, session_name, status, resume_token FROM sessions WHERE id = ?").get(sessionId) as
         { node_id: string; session_name: string; status: string; resume_token: string | null } | undefined;
       const sameSession = current?.node_id === node.id && current.session_name === sessionName && current.status === "running";
@@ -2141,6 +2198,18 @@ export class RestoreOrchestrator {
     return "floor";
   }
 
+  /** The live seat's current model: `rig seat set-model` saves it on the live node after the snapshot, and every
+   *  managed resume reads it at call time, so an older snapshot can't bring back the model it replaced. Found by logical
+   *  id, as effort's restore does; a seat with no live row, or no model on it, keeps the snapshot's. */
+  private liveModel(rigId: string, node: { logicalId: string; model?: string | null }, selectedNodeId?: string): string | null {
+    const row = this.db.prepare(selectedNodeId
+      ? "SELECT model FROM nodes WHERE id = ? AND rig_id = ? AND logical_id = ?"
+      : "SELECT model FROM nodes WHERE rig_id = ? AND logical_id = ?")
+      .get(...(selectedNodeId ? [selectedNodeId, rigId, node.logicalId] : [rigId, node.logicalId])) as
+      { model: string | null } | undefined;
+    return row?.model ?? node.model ?? null;
+  }
+
   /** The live seat's current Codex profile: a setter change made after the snapshot is the newer choice, so an older
    *  snapshot can't bring back the profile it replaced. The seat is found by logical id, as effort's restore does; a
    *  seat with no live row keeps the snapshot's value. */
@@ -2168,6 +2237,7 @@ export class RestoreOrchestrator {
     warnings?: string[],
     advisor?: string | null,
     beforeNative?: () => boolean,
+    claudeExecutable?: string,
   ): Promise<
     | { kind: "resumed"; launchedProcess?: ClaudeLaunchedProcess }
     | { kind: "retry_fresh" }
@@ -2180,6 +2250,7 @@ export class RestoreOrchestrator {
     let kernelAuthority = false;
     let teamPermissionDefault = false;
     let claudePermissions: import("./claude-permission-rules.js").ClaudePermissionRules | undefined;
+    let claudeMcp: ClaudeMcp | undefined;
     let codexPermissions: import("./codex-member-permissions.js").CodexMemberPermissions | undefined;
     let permissionMode: string | undefined;
     try {
@@ -2189,6 +2260,7 @@ export class RestoreOrchestrator {
       kernelAuthority = override.kernelAuthority === true;
       teamPermissionDefault = override.teamPermissionDefault === true;
       claudePermissions = override.claudePermissions;
+      claudeMcp = runtime === "claude-code" ? readSeatClaudeMcp(this.db, nodeId) : undefined;
       codexPermissions = override.codexPermissions;
       resolvedPosture = override.launchPosture ?? resolvedPosture;
       permissionMode = override.permissionMode ?? (resolvedPosture === "auto" && runtime === "claude-code" ? "auto" : undefined);
@@ -2207,10 +2279,12 @@ export class RestoreOrchestrator {
       const tail: unknown[] = claudePermissions !== undefined
         ? [...claudeTail, ...Array(5 - claudeTail.length).fill(undefined), launch.additions, claudePermissions]
         : launch.additions ? [...claudeTail, ...Array(5 - claudeTail.length).fill(undefined), launch.additions] : claudeTail;
-      const guardedTail = beforeNative ? [...tail, ...Array(Math.max(0, 7 - tail.length)).fill(undefined), beforeNative] : tail;
+      const guardedTail = beforeNative || claudeExecutable ? [...tail, ...Array(Math.max(0, 7 - tail.length)).fill(undefined), beforeNative,
+        ...(claudeExecutable ? [claudeExecutable] : [])] : tail;
+      const mcpTail = claudeMcp === undefined ? guardedTail : [...guardedTail, ...Array(Math.max(0, 9 - guardedTail.length)).fill(undefined), claudeMcp];
       if (beforeNative && !beforeNative()) return { kind: "attention_required", message: "The selected seat, settings or history changed during native preparation; resume was not dispatched." };
       const result = await this.claudeResume.resume(sessionName, resumeType, resumeToken, cwd, resolvedPosture, model, permissionMode, nodeId,
-        ...(guardedTail as [...typeof launchTail, advisor?: string, launchAdditions?: SeatLaunchAdditions, claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules, beforeNativeDispatch?: () => boolean]));
+        ...(mcpTail as [...typeof launchTail, advisor?: string, launchAdditions?: SeatLaunchAdditions, claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules, beforeNativeDispatch?: () => boolean, executable?: string, claudeMcp?: ClaudeMcp]));
       if (result.ok) {
         // OPR.0.7.0.9: the resumed conversation's own start, as on the pod-aware path.
         const promptNote = launch.additions?.appendSystemPromptFile && nodeId && resumeToken ? systemPromptPendingNoteForNode(this.db, nodeId, resumeToken) : undefined;

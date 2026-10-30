@@ -11,6 +11,9 @@ import { makeParkedOwnerConsumerPolicy, makeRigAnchor, PARKED_OWNER_POLICY_NAME,
 import type { PolicyJob } from "../src/domain/policies/types.js";
 import { WatchdogHistoryLog, type WatchdogHistoryEntry } from "../src/domain/watchdog-history-log.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
+import { tmuxAttachCommand } from "../src/adapters/tmux-server.js";
+import { shellQuote } from "../src/adapters/shell-quote.js";
+import { makeKernelHookReviewReader } from "../src/domain/kernel-hook-review.js";
 import { runWakeLadderTick, queueRecoveryOwnsWake, classifyPromptAfterRefusal } from "../src/domain/queue-wake-ladder.js";
 import { makeOperatorDeliveryEngine } from "../src/domain/gateway/operator-delivery-engine.js";
 import { buildSlackGatewayWire } from "../src/domain/gateway/slack/slack-subsystem.js";
@@ -128,6 +131,37 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
     expect(repo.getById(row.qitemId)?.state).toBe("in-progress");
   });
 
+  it("a stale cross-host sender cannot prevent a prompt alert reaching the existing human route", async () => {
+    const row = await refusal();
+    const staleSource = "sender@remote@retired-host";
+    db.prepare("UPDATE queue_items SET source_session=? WHERE qitem_id=?").run(staleSource, row.qitemId);
+    repo = new QueueRepository(db, new EventBus(db), { validateRig: target => target !== staleSource });
+    const posts: unknown[] = [], wakes: string[] = [];
+    const port = engine(posts);
+    const result = await tick(port, { attemptWake: async (_id, target) => { wakes.push(target); return "failed:fixture"; } });
+    expect(result.outcome).not.toBe("failed");
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(wakes).toEqual([]);
+    expect(alerts()).toHaveLength(1);
+    expect(alerts()[0]?.destinationSession).toBe(seat); // carrier only, never a pane nudge
+    expect(alerts()[0]?.sourceSession).toBe(staleSource); // provenance is not rewritten
+    expect(JSON.stringify(posts)).toContain(row.qitemId);
+    await tick(port);
+    expect(posts).toHaveLength(1);
+  });
+
+  it("an invalid sender does not turn an explicit-only choice alert into a human post", async () => {
+    const row = await refusal(1, `Refused: '${seat}' is at an interactive prompt (selection_prompt). No text was sent.`);
+    const staleSource = "sender@remote@retired-host";
+    db.prepare("UPDATE queue_items SET source_session=? WHERE qitem_id=?").run(staleSource, row.qitemId);
+    repo = new QueueRepository(db, new EventBus(db), { validateRig: target => target !== staleSource });
+    const posts: unknown[] = [];
+    await tick(engine(posts), { humanRung: "explicit-only", loadHumanRegistry: () => registry });
+    expect(alerts()).toHaveLength(1);
+    expect(posts).toEqual([]);
+    expect(notes(alerts()[0]!.qitemId).some(note => note.includes("human rung explicit-only"))).toBe(true);
+  });
+
   it("HUMAN RUNG EXPLICIT-ONLY: a prompt-blocked seat still reaches a person, since only a person can clear it", async () => {
     await refusal(); const posts: unknown[] = [];
     await runWakeLadderTick({ db, queueRepo: repo, resolveOrchestrator: () => null,
@@ -165,6 +199,155 @@ describe("prompt-blocked outstanding work reaches the configured route", () => {
       retryIntervalSeconds: 60, now: new Date(Date.now() + 120_000), deliveryEngine: port,
       attemptWake: async () => { throw new Error("unexpected seat input"); }, log: () => {}, ...opts });
   }
+
+  describe("kernel hook review without a refused wake", () => {
+    const observedAt = new Date("2030-01-01T00:00:00Z");
+    let hookState: "blocked" | "clear" | "unknown";
+    let sampledAt: string;
+    beforeEach(() => { hookState = "blocked"; sampledAt = observedAt.toISOString(); });
+    function hookTick(port: ReturnType<typeof engine>, opts: Partial<Parameters<typeof runWakeLadderTick>[0]> = {}) {
+      const observation = { destination: seat, episode: "session-1:%1:123", state: hookState, observedAt: sampledAt };
+      return tick(port, { now: observedAt, ...{ readHookReviews: async () => [observation] }, ...opts });
+    }
+
+    it("posts one named hook-review alert with no row or send and retires on a fresh clear", async () => {
+      expect(repo.list({ limit: 1000 })).toHaveLength(0);
+      const posts: unknown[] = []; const port = engine(posts);
+      expect((await hookTick(port)).outcome).not.toBe("failed");
+      await vi.waitFor(() => expect(posts).toHaveLength(1));
+      const alert = alerts()[0]!;
+      expect(alert.body).toContain(seat);
+      expect(alert.body).toContain("Hooks need review");
+      expect(alert.body).toContain("Codex's hook review");
+      expect(alert.body).toContain("does not approve");
+      for (let n = 0; n < 3; n++) await hookTick(port);
+      expect(posts).toHaveLength(1);
+      expect(alerts()).toHaveLength(1);
+      hookState = "unknown";
+      await hookTick(port);
+      expect(alerts()).toHaveLength(1); // uncertainty cannot resolve or alert again
+      hookState = "clear";
+      await hookTick(port);
+      expect(alerts()).toHaveLength(0);
+      expect(repo.getById(alert.qitemId)?.state).toBe("done");
+      expect(posts).toHaveLength(1);
+    });
+
+    it.each(["unknown", "stale"])("does not create an ask from %s observation", async kind => {
+      if (kind === "unknown") hookState = "unknown";
+      else sampledAt = new Date(observedAt.getTime() - 60_000).toISOString();
+      const posts: unknown[] = [];
+      await hookTick(engine(posts));
+      expect(alerts()).toHaveLength(0);
+      expect(posts).toHaveLength(0);
+    });
+
+    it("joins the existing refused-wake episode rather than posting a second alert", async () => {
+      await refusal(1, `Refused: '${seat}' is at an interactive prompt (selection_prompt). No text was sent.`);
+      const posts: unknown[] = []; const port = engine(posts);
+      await hookTick(port);
+      await vi.waitFor(() => expect(posts).toHaveLength(1));
+      expect(alerts()).toHaveLength(1);
+      expect(alerts()[0]!.tags).toContain(`recovery-for:${episodeRows[0]}`);
+      await hookTick(port);
+      expect(posts).toHaveLength(1);
+    });
+
+    it("adds hook guidance once to an earlier dispatched and exhausted alert without another delivery", async () => {
+      await refusal();
+      const posts: unknown[] = []; const port = engine(posts);
+      await tick(port, { now: observedAt }); // prior tick has no hook observation
+      await vi.waitFor(() => expect(posts).toHaveLength(1));
+      const alert = alerts()[0]!;
+      expect(alert.body).not.toContain("Hooks need review");
+      await vi.waitFor(() => expect(notes(alert.qitemId).some(n => n.startsWith("slack-owner-notification-posted "))).toBe(true));
+      await tick(port, { now: observedAt });
+      expect(notes(alert.qitemId).some(n => n.startsWith("ladder-exhausted:"))).toBe(true);
+      repo.claim({ qitemId: alert.qitemId, destinationSession: alert.destinationSession });
+      const before = repo.getById(alert.qitemId)!;
+      const receipts = notes(alert.qitemId).filter(n => n.startsWith("slack-owner-notification-") || n.includes("dispatched-to-engine"));
+      await hookTick(port);
+      const updated = repo.getById(alert.qitemId)!;
+      expect(updated.summary).toContain("Hooks need review");
+      expect(updated.summary).toContain(tmuxAttachCommand(shellQuote(seat)));
+      expect(notes(alert.qitemId).filter(n => n.startsWith("hook-review observed:"))).toHaveLength(1);
+      expect(notes(alert.qitemId).join("\n")).toContain("through Codex's hook review");
+      expect(updated.body).toBe(before.body); // retain the original delivered content and receipt
+      expect([updated.qitemId, updated.state, updated.destinationSession, updated.claimedAt])
+        .toEqual([before.qitemId, before.state, before.destinationSession, before.claimedAt]);
+      for (let n = 0; n < 3; n++) await hookTick(port);
+      expect(posts).toHaveLength(1);
+      expect(alerts()).toHaveLength(1);
+      expect(notes(alert.qitemId).filter(n => n.startsWith("hook-review observed:"))).toHaveLength(1);
+      expect(notes(alert.qitemId).filter(n => n.startsWith("slack-owner-notification-") || n.includes("dispatched-to-engine")))
+        .toEqual(receipts);
+    });
+
+    it("retains unresolved routing without claiming delivery when no person is registered", async () => {
+      const posts: unknown[] = []; const port = engine(posts, false);
+      await hookTick(port);
+      expect(alerts()).toHaveLength(1);
+      const log = notes(alerts()[0]!.qitemId).join("\n");
+      expect(log).toContain("undeliverable:no-registered-human");
+      expect(log).not.toContain("operator rung resolved");
+      expect(posts).toHaveLength(0);
+    });
+
+    it("honors an intentional suspension and checks the gate again before delivery", async () => {
+      const posts: unknown[] = []; const port = engine(posts);
+      const old = process.env.OPENRIG_WAKE_SUSPEND;
+      process.env.OPENRIG_WAKE_SUSPEND = `${seat}:2030-01-01T01:00:00Z`;
+      try { await hookTick(port); expect(alerts()).toHaveLength(0); }
+      finally { if (old === undefined) delete process.env.OPENRIG_WAKE_SUSPEND; else process.env.OPENRIG_WAKE_SUSPEND = old; }
+      let reads = 0;
+      await hookTick(port, { ...{ readHookReviews: async () => [{ destination: seat, episode: "session-1:%1:123",
+        state: ++reads === 1 ? "blocked" as const : "clear" as const, observedAt: sampledAt }] } });
+      expect(posts).toHaveLength(0);
+    });
+  });
+
+  it("routes a real kernel binding's current hook screen through the production observation reader", async () => {
+    const rigs = new RigRepository(db); const sessions = new SessionRegistry(db);
+    const rig = rigs.createRig("kernel"); const node = rigs.addNode(rig.id, "operator", { runtime: "codex" });
+    const destination = "operator@kernel";
+    const session = sessions.registerSession(node.id, destination); sessions.updateStatus(session.id, "running");
+    sessions.updateBinding(node.id, { attachmentType: "tmux", tmuxSession: destination, tmuxPane: "%17" });
+    let screen: string | null = "OpenAI Codex (v0.164.0)\nHooks need review\nTrust all and continue";
+    let dead: boolean | undefined = false;
+    let pane = "%17";
+    let changeBinding = false;
+    const tmux = {
+      listPanes: vi.fn(async () => [{ id: pane, index: 0, cwd: "/fixture", width: 80, height: 24, active: true }]),
+      readAllPaneProcesses: vi.fn(async () => new Map([["%17", { pid: 123, command: "codex", dead }]])),
+      capturePaneScreen: vi.fn(async () => {
+        if (changeBinding) sessions.updateBinding(node.id, { tmuxPane: "%18" });
+        return screen;
+      }),
+    };
+    const now = new Date("2030-01-01T00:00:00Z");
+    const readHookReviews = makeKernelHookReviewReader({ db, tmux, now: () => now });
+    const posts: unknown[] = []; const port = engine(posts);
+    await tick(port, { now, readHookReviews });
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(alerts()[0]!.body).toContain(destination);
+    for (const unavailable of [null, "unrecognised screen"]) {
+      screen = unavailable;
+      await tick(port, { now, readHookReviews });
+      expect(alerts()).toHaveLength(1);
+      expect(posts).toHaveLength(1);
+    }
+    screen = "OpenAI Codex (v0.164.0)\nmodel: gpt-5\n› ";
+    expect((await readHookReviews())[0]?.state).toBe("clear");
+    await tick(port, { now, readHookReviews });
+    expect(alerts()).toHaveLength(0);
+    screen = "Hooks need review\nTrust all and continue";
+    for (dead of [true, undefined]) expect((await readHookReviews())[0]?.state).toBe("unknown");
+    dead = false; pane = "%18";
+    expect((await readHookReviews())[0]?.state).toBe("unknown");
+    pane = "%17"; changeBinding = true;
+    expect((await readHookReviews())[0]?.state).toBe("unknown");
+    expect(posts).toHaveLength(1);
+  });
 
   it("several rows share one alert, persisted acceptance and receipt across reconstructed ticks", async () => {
     await refusal(3); const posts: unknown[] = []; const port = engine(posts);
