@@ -315,6 +315,20 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
     if (!command || isShellForeground(command)) {
       return { ready: false, reason: `Community harness "${this.runtime}" isn't running: the pane is at a shell.`, code: "harness_not_running" };
     }
+    // A launcher process is not a shell, so the check above passes the moment the launch command runs — before the TUI
+    // has drawn anything. Startup text typed then lands in the shell that started the harness. Wait for the screen to
+    // show the harness rather than the launch line: this is what tells a drawn TUI from a process that just started.
+    if (this.deps.tmux.capturePaneContent) {
+      const screen = await this.deps.tmux.capturePaneContent(binding.tmuxPane ?? session, 40, { joinWrappedLines: true }, true).catch(() => null);
+      if (screen !== null) {
+        const lines = screen.split(/\r?\n/).map(line => line.replace(/\s+$/, "")).filter(line => line.length > 0);
+        // The launch line itself (a staged script invocation) and its echo are not the TUI.
+        const drawn = lines.filter(line => !/\b(openrig-tmux-send|powershell|PS [A-Z]:).*-File|\[scriptblock\]::Create/.test(line));
+        if (drawn.length < 3) {
+          return { ready: false, reason: `Community harness "${this.runtime}" has started but hasn't drawn its screen yet.`, code: "harness_not_drawn" };
+        }
+      }
+    }
     return { ready: true };
   }
 
