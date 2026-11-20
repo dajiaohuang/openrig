@@ -908,19 +908,15 @@ export class StartupOrchestrator {
         if (action.type === "send_text" && action.appliesOn.includes(context) && action.phase === "after_ready") consumedActions.add(action);
       }
     }
-    // A startup-assisted harness has no launcher-taken first turn: its text is typed through the pane, one action at a
-    // time. Typing several back to back puts the second into the composer while the first is still rendering, so they
-    // are joined into one turn here — the same causal ordering the restore path gets by bundling.
-    const assistedAfterReady = input.adapter instanceof CommunityHarnessRuntimeAdapter && !input.firstInputPassed && !input.adapter.firstInput()
+    // A startup-assisted harness has no launcher-taken first turn, and its pane is a rendering TUI: a second send while
+    // the first is still drawing the composer interleaves the two. The applicable after_ready text therefore travels in
+    // the same prompt as the identity context, once, and those actions are marked consumed so step 9 doesn't repeat them.
+    const assistedStartup = input.adapter instanceof CommunityHarnessRuntimeAdapter && !input.firstInputPassed && !input.adapter.firstInput();
+    const assistedAfterReady = assistedStartup
       ? input.startupActions.filter((a) => a.type === "send_text" && !isSessionIdentityAction(a) && !consumedActions.has(a)
         && a.appliesOn.includes(context) && a.phase === "after_ready" && !(input.isRestore && !a.idempotent))
       : [];
-    let assistedBundle: StartupAction | null = null;
-    if (assistedAfterReady.length > 1) {
-      assistedBundle = { type: "send_text", value: assistedAfterReady.map((a) => a.value).join("\n\n"), phase: "after_ready", appliesOn: [context], idempotent: true };
-      for (const action of assistedAfterReady) consumedActions.add(action);
-      deliveryInput.startupActions = [...input.startupActions.filter((a) => !consumedActions.has(a)), assistedBundle];
-    }
+    for (const action of assistedAfterReady) consumedActions.add(action);
     // A community harness whose launcher took the first turn already has it: the identity context and the applicable
     // after_ready text travelled in that one input, so sending them again would type a second, interleaved turn into a
     // composer that is mid-render.
@@ -933,7 +929,8 @@ export class StartupOrchestrator {
     if (continuityOutcome === "fresh" && identityAction) {
       const initialPrompt = input.firstInputPassed && launchPrompt
         ? { ok: true as const, remainingFiles: launchPrompt.remainingFiles }
-        : await this.deliverInitialSessionPrompt(deliveryInput, identityAction, postLaunchFiles, challenge?.promptBlock ?? null, input.includeDurableObligations);
+        : await this.deliverInitialSessionPrompt(deliveryInput, identityAction, postLaunchFiles, challenge?.promptBlock ?? null, input.includeDurableObligations,
+        assistedAfterReady.map((a) => a.value));
       if (!initialPrompt.ok) {
         errors.push(initialPrompt.error);
         return this.fail(input, "failed", errors, undefined, false, undefined, false, "initial_prompt", true);
@@ -1296,6 +1293,8 @@ export class StartupOrchestrator {
     postLaunchFiles: ResolvedStartupFile[],
     challengeBlock: string | null,
     includeDurableObligations = false,
+    /** Startup-assisted harness: after_ready text that must travel in this same turn, never as a second send. */
+    trailingText: readonly string[] = [],
   ): Promise<{ ok: true; remainingFiles: ResolvedStartupFile[] } | { ok: false; error: string }> {
     const { binding } = input;
     if (!binding.tmuxSession) {
@@ -1303,7 +1302,8 @@ export class StartupOrchestrator {
     }
 
     const { prompt, remainingFiles } = this.composeInitialSessionPrompt(input, identityAction, postLaunchFiles, challengeBlock, includeDurableObligations);
-    const sendError = await this.sendInteractiveText(input, prompt, "initial_identity");
+    const combined = trailingText.length ? [prompt, ...trailingText].join("\n\n") : prompt;
+    const sendError = await this.sendInteractiveText(input, combined, "initial_identity");
     if (sendError) {
       return { ok: false, error: `Initial session identity prompt failed: ${sendError.error}` };
     }
