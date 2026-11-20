@@ -229,6 +229,12 @@ function findAgentSource(node: Node, saved: ParsedStartupContext, fsOps: AgentRe
   // The rig root isn't recorded, so the agent spec is found where the saved launch read it from.
   const candidates = new Set<string>();
   if (node.agentRef?.startsWith("path:")) candidates.add(node.agentRef.slice("path:".length));
+  // A `local:` ref whose remainder is an absolute path names its directory without a rig root, so it is a candidate too.
+  // A relative remainder still needs that root, which isn't recorded, so it stays out rather than being guessed from cwd.
+  if (node.agentRef?.startsWith("local:")) {
+    const remainder = node.agentRef.slice("local:".length);
+    if (nodePath.isAbsolute(remainder)) candidates.add(remainder);
+  }
   for (const entry of saved.plan.entries) candidates.add(reanchorShippedProjectionEntry(entry).sourcePath);
   for (const file of saved.resolvedStartupFiles) candidates.add(reanchorBuiltinStartupFile(file).ownerRoot);
   const sources = [...candidates]
