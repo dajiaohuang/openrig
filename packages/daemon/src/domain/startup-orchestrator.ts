@@ -900,6 +900,35 @@ export class StartupOrchestrator {
       postLaunchFiles = []; // All resolved files were projected before the guest's initial input.
       for (const action of input.startupActions) if (action.type === "send_text") consumedActions.add(action);
     }
+    // A harness that hands its first turn to the launcher already has it: the identity context and the applicable
+    // after_ready text travelled in that one input, so sending them again would type a second, interleaved turn into a
+    // composer that is mid-render.
+    if (input.firstInputPassed && launchPrompt) {
+      for (const action of input.startupActions) {
+        if (action.type === "send_text" && action.appliesOn.includes(context) && action.phase === "after_ready") consumedActions.add(action);
+      }
+    }
+    // A startup-assisted harness has no launcher-taken first turn: its text is typed through the pane, one action at a
+    // time. Typing several back to back puts the second into the composer while the first is still rendering, so they
+    // are joined into one turn here — the same causal ordering the restore path gets by bundling.
+    const assistedAfterReady = input.adapter instanceof CommunityHarnessRuntimeAdapter && !input.firstInputPassed && !input.adapter.firstInput()
+      ? input.startupActions.filter((a) => a.type === "send_text" && !isSessionIdentityAction(a) && !consumedActions.has(a)
+        && a.appliesOn.includes(context) && a.phase === "after_ready" && !(input.isRestore && !a.idempotent))
+      : [];
+    let assistedBundle: StartupAction | null = null;
+    if (assistedAfterReady.length > 1) {
+      assistedBundle = { type: "send_text", value: assistedAfterReady.map((a) => a.value).join("\n\n"), phase: "after_ready", appliesOn: [context], idempotent: true };
+      for (const action of assistedAfterReady) consumedActions.add(action);
+      deliveryInput.startupActions = [...input.startupActions.filter((a) => !consumedActions.has(a)), assistedBundle];
+    }
+    // A community harness whose launcher took the first turn already has it: the identity context and the applicable
+    // after_ready text travelled in that one input, so sending them again would type a second, interleaved turn into a
+    // composer that is mid-render.
+    if (input.firstInputPassed && launchPrompt) {
+      for (const action of input.startupActions) {
+        if (action.type === "send_text" && action.appliesOn.includes(context) && action.phase === "after_ready") consumedActions.add(action);
+      }
+    }
     let challengeOnlyPrompt: string | null = null;
     if (continuityOutcome === "fresh" && identityAction) {
       const initialPrompt = input.firstInputPassed && launchPrompt
